@@ -1,13 +1,62 @@
+"""
+Microsoft Graph Authentication Module - Delegated Access
+
+This module implements delegated access authentication for Microsoft Graph API.
+Delegated access allows the application to act on behalf of a signed-in user,
+accessing only the data that the user has permission to access.
+
+Key Features:
+- Uses azure.identity.InteractiveBrowserCredential for modern authentication
+- Implements interactive authentication with authorization code flow + PKCE
+- Requests specific delegated permissions (scopes) rather than broad access
+- Supports token caching automatically through azure.identity
+- Works seamlessly with msgraph.GraphServiceClient
+
+Authentication Flow:
+- Uses InteractiveBrowserCredential which opens a browser for user sign-in
+- Implements PKCE (Proof Key for Code Exchange) for security
+- No special permissions required (unlike device flow)
+- Handles token refresh automatically
+
+Delegated Permissions Used:
+- User.Read: Read the signed-in user's profile
+- User.ReadBasic.All: Read basic info of all users
+- Mail.Read: Read user's mail
+- Mail.Send: Send mail as user
+- Team.ReadBasic.All: Read basic team information
+- TeamMember.ReadWrite.All: Read and write team membership
+
+This is different from "app-only access" where the app acts with its own identity
+and requires application permissions rather than delegated permissions.
+
+Requirements:
+- Azure AD app registration with public client flow enabled
+- Delegated permissions configured in Azure AD
+- MICROSOFT_MCP_CLIENT_ID and MICROSOFT_MCP_TENANT_ID environment variables
+- Web browser available for interactive authentication
+"""
+
 import os
-import msal
-import pathlib as pl
-from typing import NamedTuple
+import asyncio
+from typing import NamedTuple, Optional
 from dotenv import load_dotenv
+from azure.identity import InteractiveBrowserCredential
+from msgraph import GraphServiceClient
 
 load_dotenv()
 
-CACHE_FILE = pl.Path.home() / ".microsoft_mcp_token_cache.json"
-SCOPES = ["https://graph.microsoft.com/.default"]
+# Delegated permissions (scopes) for accessing user data on behalf of the signed-in user
+# These match the scopes used in your working example.py
+SCOPES = [
+    "User.Read",
+    "User.ReadBasic.All", 
+    "Mail.Read",
+    "Mail.Send",
+    "Team.ReadBasic.All",
+    "TeamMember.ReadWrite.All",
+    "Calendars.Read",
+    "Files.Read"
+]
 
 
 class Account(NamedTuple):
@@ -15,135 +64,127 @@ class Account(NamedTuple):
     account_id: str
 
 
-def _read_cache() -> str | None:
-    try:
-        return CACHE_FILE.read_text()
-    except FileNotFoundError:
-        return None
-
-
-def _write_cache(content: str) -> None:
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_FILE.write_text(content)
-
-
-def get_app() -> msal.PublicClientApplication:
+def get_credential() -> InteractiveBrowserCredential:
+    """
+    Create and configure InteractiveBrowserCredential for delegated access.
+    This credential handles the interactive authentication flow automatically.
+    """
     client_id = os.getenv("MICROSOFT_MCP_CLIENT_ID")
     if not client_id:
         raise ValueError("MICROSOFT_MCP_CLIENT_ID environment variable is required")
 
     tenant_id = os.getenv("MICROSOFT_MCP_TENANT_ID", "common")
-    authority = f"https://login.microsoftonline.com/{tenant_id}"
-
-    cache = msal.SerializableTokenCache()
-    cache_content = _read_cache()
-    if cache_content:
-        cache.deserialize(cache_content)
-
-    app = msal.PublicClientApplication(
-        client_id, authority=authority, token_cache=cache
+    
+    credential = InteractiveBrowserCredential(
+        client_id=client_id,
+        tenant_id=tenant_id,
     )
+    
+    return credential
 
-    return app
+
+def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
+    """
+    Get a configured Microsoft Graph client for delegated access.
+    
+    Args:
+        scopes: Custom scopes to request. If None, uses default SCOPES.
+    
+    Returns:
+        GraphServiceClient configured for delegated access.
+    """
+    credential = get_credential()
+    requested_scopes = scopes or SCOPES
+    
+    client = GraphServiceClient(
+        credentials=credential, 
+        scopes=requested_scopes
+    )
+    
+    return client
 
 
-def get_token(account_id: str | None = None) -> str:
-    app = get_app()
+async def get_user_info() -> dict:
+    """
+    Get user information using delegated access.
+    This demonstrates accessing user data on behalf of the signed-in user.
+    
+    Returns:
+        Dictionary containing user information from Microsoft Graph /me endpoint.
+    """
+    client = get_graph_client(scopes=["User.Read"])
+    
+    try:
+        me = await client.me.get()
+        if me:
+            return {
+                "displayName": me.display_name,
+                "mail": me.mail or me.user_principal_name,
+                "jobTitle": me.job_title,
+                "id": me.id,
+                "userPrincipalName": me.user_principal_name,
+                "givenName": me.given_name,
+                "surname": me.surname
+            }
+        else:
+            raise Exception("Failed to retrieve user information")
+    except Exception as e:
+        raise Exception(f"Error getting user info: {str(e)}")
 
-    accounts = app.get_accounts()
-    account = None
 
-    if account_id:
-        account = next(
-            (a for a in accounts if a["home_account_id"] == account_id), None
+async def authenticate_new_account() -> Optional[Account]:
+    """
+    Authenticate a new account interactively using delegated access.
+    This allows the app to act on behalf of the signed-in user.
+    Uses InteractiveBrowserCredential with authorization code flow + PKCE.
+    """
+    print("\nDelegated Access Authentication:")
+    print("This will allow the app to access Microsoft Graph on your behalf.")
+    print("Opening browser for interactive authentication...")
+    print("You will be redirected to sign in with your Microsoft account.")
+    print("Requested permissions:")
+    for scope in SCOPES:
+        print(f"   - {scope}")
+    print("\nStarting authentication...")
+    
+    try:
+        # Get user info to verify authentication worked
+        # This will trigger the interactive authentication if needed
+        user_info = await get_user_info()
+        
+        return Account(
+            username=user_info["mail"] or user_info["userPrincipalName"],
+            account_id=user_info["id"]
         )
-    elif accounts:
-        account = accounts[0]
+    except Exception as e:
+        raise Exception(f"Authentication failed: {str(e)}")
 
-    result = app.acquire_token_silent(SCOPES, account=account)
 
-    if not result:
-        flow = app.initiate_device_flow(scopes=SCOPES)
-        if "user_code" not in flow:
-            raise Exception(
-                f"Failed to get device code: {flow.get('error_description', 'Unknown error')}"
-            )
-        verification_uri = flow.get(
-            "verification_uri",
-            flow.get("verification_url", "https://microsoft.com/devicelogin"),
-        )
-        print(
-            f"\nTo authenticate:\n1. Visit {verification_uri}\n2. Enter code: {flow['user_code']}"
-        )
-        result = app.acquire_token_by_device_flow(flow)
-
-    if "error" in result:
-        raise Exception(
-            f"Auth failed: {result.get('error_description', result['error'])}"
-        )
-
-    cache = app.token_cache
-    if isinstance(cache, msal.SerializableTokenCache) and cache.has_state_changed:
-        _write_cache(cache.serialize())
-
-    return result["access_token"]
+async def list_accounts_async() -> list[Account]:
+    """
+    List authenticated accounts. With InteractiveBrowserCredential, 
+    we can only check if current authentication works.
+    """
+    try:
+        user_info = await get_user_info()
+        return [Account(
+            username=user_info["mail"] or user_info["userPrincipalName"],
+            account_id=user_info["id"]
+        )]
+    except:
+        return []
 
 
 def list_accounts() -> list[Account]:
-    app = get_app()
-    return [
-        Account(username=a["username"], account_id=a["home_account_id"])
-        for a in app.get_accounts()
-    ]
-
-
-def authenticate_new_account() -> Account | None:
-    """Authenticate a new account interactively"""
-    app = get_app()
-
-    flow = app.initiate_device_flow(scopes=SCOPES)
-    if "user_code" not in flow:
-        raise Exception(
-            f"Failed to get device code: {flow.get('error_description', 'Unknown error')}"
-        )
-
-    print("\nTo authenticate:")
-    print(
-        f"1. Visit: {flow.get('verification_uri', flow.get('verification_url', 'https://microsoft.com/devicelogin'))}"
-    )
-    print(f"2. Enter code: {flow['user_code']}")
-    print("3. Sign in with your Microsoft account")
-    print("\nWaiting for authentication...")
-
-    result = app.acquire_token_by_device_flow(flow)
-
-    if "error" in result:
-        raise Exception(
-            f"Auth failed: {result.get('error_description', result['error'])}"
-        )
-
-    cache = app.token_cache
-    if isinstance(cache, msal.SerializableTokenCache) and cache.has_state_changed:
-        _write_cache(cache.serialize())
-
-    # Get the newly added account
-    accounts = app.get_accounts()
-    if accounts:
-        # Find the account that matches the token we just got
-        for account in accounts:
-            if (
-                account.get("username", "").lower()
-                == result.get("id_token_claims", {})
-                .get("preferred_username", "")
-                .lower()
-            ):
-                return Account(
-                    username=account["username"], account_id=account["home_account_id"]
-                )
-        # If exact match not found, return the last account
-        account = accounts[-1]
-        return Account(
-            username=account["username"], account_id=account["home_account_id"]
-        )
-
-    return None
+    """
+    Synchronous wrapper for list_accounts_async.
+    """
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(list_accounts_async())
+        finally:
+            loop.close()
+    except:
+        return []
