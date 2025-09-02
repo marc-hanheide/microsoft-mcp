@@ -10,6 +10,7 @@ Key Features:
 - Implements interactive authentication with authorization code flow + PKCE
 - Requests specific delegated permissions (scopes) rather than broad access
 - Supports token caching automatically through azure.identity
+- Additional token caching at application level for improved performance
 - Works seamlessly with msgraph.GraphServiceClient
 
 Authentication Flow:
@@ -17,6 +18,14 @@ Authentication Flow:
 - Implements PKCE (Proof Key for Code Exchange) for security
 - No special permissions required (unlike device flow)
 - Handles token refresh automatically
+- Caches tokens locally to avoid unnecessary re-authentication
+
+Token Caching:
+- Tokens are cached in ~/.microsoft_mcp_delegated_token_cache.json
+- Cached tokens are validated before use (5-minute expiration buffer)
+- Additional API verification ensures tokens are actually valid
+- Invalid/expired tokens trigger automatic re-authentication
+- Cache can be cleared manually using clear_token_cache()
 
 Delegated Permissions Used:
 - User.Read: Read the signed-in user's profile
@@ -39,12 +48,19 @@ Requirements:
 
 import os
 import asyncio
+import json
+import time
+from pathlib import Path
 from typing import NamedTuple, Optional
 from dotenv import load_dotenv
 from azure.identity import InteractiveBrowserCredential
+from azure.core.credentials import AccessToken
 from msgraph import GraphServiceClient
 
 load_dotenv()
+
+# Token cache file location
+TOKEN_CACHE_FILE = Path.home() / ".microsoft_mcp_delegated_token_cache.json"
 
 # Delegated permissions (scopes) for accessing user data on behalf of the signed-in user
 # These match the scopes used in your working example.py
@@ -63,6 +79,58 @@ SCOPES = [
 class Account(NamedTuple):
     username: str
     account_id: str
+
+
+class CachedToken(NamedTuple):
+    """Cached access token with expiration time"""
+
+    token: str
+    expires_on: float  # Unix timestamp
+
+
+def _read_token_cache() -> Optional[CachedToken]:
+    """Read cached token from file"""
+    try:
+        if TOKEN_CACHE_FILE.exists():
+            with open(TOKEN_CACHE_FILE, "r") as f:
+                data = json.load(f)
+                return CachedToken(token=data["token"], expires_on=data["expires_on"])
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _write_token_cache(token: str, expires_on: float) -> None:
+    """Write token to cache file"""
+    try:
+        TOKEN_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(TOKEN_CACHE_FILE, "w") as f:
+            json.dump({"token": token, "expires_on": expires_on}, f)
+    except Exception:
+        # If we can't write the cache, continue without it
+        pass
+
+
+def _is_token_valid(cached_token: CachedToken) -> bool:
+    """Check if cached token is still valid (with 5-minute buffer)"""
+    current_time = time.time()
+    buffer_time = 300  # 5 minutes buffer
+    return cached_token.expires_on > (current_time + buffer_time)
+
+
+async def _verify_token_with_api(token: str) -> bool:
+    """Verify token is valid by making a simple API call"""
+    try:
+        import httpx
+
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10.0
+            )
+            return response.status_code == 200
+    except Exception:
+        return False
 
 
 def get_credential() -> InteractiveBrowserCredential:
@@ -108,6 +176,65 @@ def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
     client = GraphServiceClient(credentials=credential, scopes=requested_scopes)
 
     return client
+
+
+def get_token(account_id: str | None = None) -> str:
+    """
+    Get an access token for Microsoft Graph API calls with caching.
+
+    Args:
+        account_id: Not used in delegated access mode, but kept for compatibility.
+                   In delegated access, we always use the currently signed-in user.
+
+    Returns:
+        Valid access token for Microsoft Graph API.
+    """
+    # Check if we have a cached token that hasn't expired
+    cached_token = _read_token_cache()
+    if cached_token and _is_token_valid(cached_token):
+        # Verify the token is actually valid with the API
+        try:
+            import asyncio
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                is_valid = loop.run_until_complete(
+                    _verify_token_with_api(cached_token.token)
+                )
+                if is_valid:
+                    return cached_token.token
+            finally:
+                loop.close()
+        except Exception:
+            # If verification fails, continue to get a new token
+            pass
+
+    # No valid cached token, get a new one
+    credential = get_credential()
+
+    try:
+        # Get token for specific Microsoft Graph scopes
+        token: AccessToken = credential.get_token(*SCOPES)
+
+        # Cache the new token
+        _write_token_cache(token.token, token.expires_on)
+
+        return token.token
+    except Exception as e:
+        # If token acquisition fails, try to clear cache and raise the error
+        if TOKEN_CACHE_FILE.exists():
+            TOKEN_CACHE_FILE.unlink()
+        raise Exception(f"Failed to acquire access token: {str(e)}")
+
+
+def clear_token_cache() -> None:
+    """Clear the cached token to force re-authentication"""
+    try:
+        if TOKEN_CACHE_FILE.exists():
+            TOKEN_CACHE_FILE.unlink()
+    except Exception:
+        pass
 
 
 async def get_user_info() -> dict:
