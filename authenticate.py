@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Authenticate Microsoft accounts for use with Microsoft MCP.
-Run this script to sign in to one or more Microsoft accounts.
+Authenticate Microsoft account for use with Microsoft MCP.
+Run this script to sign in to your Microsoft account using delegated access.
 """
 
 import os
@@ -36,7 +36,7 @@ async def main():
     print("Microsoft MCP Delegated Access Authentication")
     print("============================================")
     print("This tool will authenticate using delegated access, allowing")
-    print("the app to access Microsoft Graph on behalf of signed-in users.")
+    print("the app to access Microsoft Graph on behalf of the signed-in user.")
     print("Authentication will open a browser window for sign-in.")
 
     # Show configuration info
@@ -47,69 +47,60 @@ async def main():
         print("Using default localhost redirect URI")
     print()
 
-    # List current accounts
-    accounts = await auth.list_accounts_async()
-    if accounts:
-        print("Currently authenticated accounts:")
-        for i, account in enumerate(accounts, 1):
-            print(f"{i}. {account.username} (ID: {account.account_id})")
-        print()
-    else:
-        print("No accounts currently authenticated.\n")
-
-    # Authenticate new account
-    while True:
-        choice = input("Do you want to authenticate a new account? (y/n): ").lower()
-        if choice == "n":
-            break
-        elif choice == "y":
-            try:
-                # Use the new authentication function
-                new_account = await auth.authenticate_new_account()
-
-                if new_account:
-                    print("\n✓ Authentication successful!")
-                    print(f"Signed in as: {new_account.username}")
-                    print(f"Account ID: {new_account.account_id}")
-                    print("✓ Delegated access verified during authentication")
-                else:
-                    print(
-                        "\n✗ Authentication failed: Could not retrieve account information"
-                    )
-            except Exception as e:
-                print(f"\n✗ Authentication failed: {e}")
-                continue
-
-            print()
+    # Check if already authenticated
+    try:
+        print("Checking current authentication status...")
+        user_info = await auth.get_user_info()
+        print(f"✓ Already authenticated as: {user_info['displayName']}")
+        print(f"  Email: {user_info.get('mail') or user_info.get('userPrincipalName')}")
+        print(f"  User ID: {user_info['id']}")
+        
+        choice = input("\nDo you want to re-authenticate? (y/n): ").lower()
+        if choice != "y":
+            print("Using existing authentication.")
+            return
         else:
-            print("Please enter 'y' or 'n'")
+            # Clear existing cache to force re-authentication
+            auth.clear_token_cache()
+            print("Token cache cleared. Proceeding with authentication...")
+    except Exception:
+        print("No valid authentication found. Proceeding with authentication...")
 
-    # Final account summary
-    accounts = await auth.list_accounts_async()
-    if accounts:
-        print("\nAuthenticated accounts summary:")
-        print("==============================")
-        for account in accounts:
-            print(f"• {account.username}")
-            print(f"  Account ID: {account.account_id}")
+    print()
 
-        print(
-            "\nYou can use these account IDs with any MCP tool by passing account_id parameter."
-        )
-        print("Example: send_email(..., account_id='<account-id>')")
-        print("\nDelegated Access Permissions:")
-        print("The authenticated accounts have consented to the following permissions:")
-        print("• User.Read - Read user profile")
-        print("• User.ReadBasic.All - Read basic info of all users")
-        print("• Mail.Read/Send - Read and send emails")
-        print("• Team.ReadBasic.All - Read basic team information")
-        print("• TeamMember.ReadWrite.All - Read and write team membership")
-        print("• Calendars.Read - Access calendars")
-        print("• Files.Read - Access OneDrive files")
-    else:
-        print("\nNo accounts authenticated.")
+    try:
+        print("Starting authentication process...")
+        print("This will open a browser window for Microsoft sign-in.")
+        print("\nRequested permissions:")
+        for scope in auth.SCOPES:
+            print(f"   - {scope}")
+        print("\nStarting authentication...")
 
-    print("\nDelegated Access Authentication complete!")
+        # Trigger authentication by trying to get user info
+        user_info = await auth.get_user_info()
+
+        print("\n✓ Authentication successful!")
+        print(f"Signed in as: {user_info['displayName']}")
+        print(f"Email: {user_info.get('mail') or user_info.get('userPrincipalName')}")
+        print(f"User ID: {user_info['id']}")
+        print("✓ Delegated access verified")
+
+    except Exception as e:
+        print(f"\n✗ Authentication failed: {e}")
+        sys.exit(1)
+
+    print("\nDelegated Access Permissions:")
+    print("The authenticated account has consented to the following permissions:")
+    print("• User.Read - Read user profile")
+    print("• User.ReadBasic.All - Read basic info of all users")
+    print("• Mail.Read - Read emails")
+    print("• Team.ReadBasic.All - Read basic team information")
+    print("• TeamMember.ReadWrite.All - Read and write team membership")
+    print("• Calendars.Read - Access calendars")
+    print("• Files.Read - Access OneDrive files")
+
+    print("\n✓ Delegated Access Authentication complete!")
+    print("You can now use the Microsoft MCP tools without specifying account_id.")
 
 
 if __name__ == "__main__":

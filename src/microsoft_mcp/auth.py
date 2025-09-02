@@ -72,17 +72,16 @@ TOKEN_CACHE_FILE = Path.home() / ".microsoft_mcp_delegated_token_cache.json"
 SCOPES = [
     "User.Read",
     "User.ReadBasic.All",
+    "Chat.Read",
+    #"ChannelMessage.Read",
     "Mail.Read",
     "Team.ReadBasic.All",
     "TeamMember.ReadWrite.All",
     "Calendars.Read",
     "Files.Read",
+    #"Sites.Read.All"
+    #"ChannelMessage.Read"
 ]
-
-
-class Account(NamedTuple):
-    username: str
-    account_id: str
 
 
 class CachedToken(NamedTuple):
@@ -133,27 +132,6 @@ def _is_token_valid(cached_token: CachedToken) -> bool:
         f"Token validity check: {'valid' if is_valid else 'expired'} (expires: {time.ctime(cached_token.expires_on)})"
     )
     return is_valid
-
-
-async def _verify_token_with_api(token: str) -> bool:
-    """Verify token is valid by making a simple API call"""
-    try:
-        logger.info("Verifying cached token with Microsoft Graph API")
-        import httpx
-
-        headers = {"Authorization": f"Bearer {token}"}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://graph.microsoft.com/v1.0/me", headers=headers, timeout=10.0
-            )
-            is_valid = response.status_code == 200
-            logger.info(
-                f"API token verification: {'successful' if is_valid else 'failed'} (status: {response.status_code})"
-            )
-            return is_valid
-    except Exception as e:
-        logger.warning(f"Token API verification failed: {e}")
-        return False
 
 
 def get_credential() -> InteractiveBrowserCredential:
@@ -211,13 +189,9 @@ def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
     return client
 
 
-def get_token(account_id: str | None = None) -> str:
+def get_token() -> str:
     """
     Get an access token for Microsoft Graph API calls with caching.
-
-    Args:
-        account_id: Not used in delegated access mode, but kept for compatibility.
-                   In delegated access, we always use the currently signed-in user.
 
     Returns:
         Valid access token for Microsoft Graph API.
@@ -227,30 +201,8 @@ def get_token(account_id: str | None = None) -> str:
     # Check if we have a cached token that hasn't expired
     cached_token = _read_token_cache()
     if cached_token and _is_token_valid(cached_token):
-        logger.info("Found valid cached token, verifying with API")
-        # Verify the token is actually valid with the API
-        try:
-            import asyncio
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                is_valid = loop.run_until_complete(
-                    _verify_token_with_api(cached_token.token)
-                )
-                if is_valid:
-                    logger.info(
-                        "Cached token verified successfully, using cached token"
-                    )
-                    return cached_token.token
-                else:
-                    logger.info(
-                        "Cached token failed API verification, will acquire new token"
-                    )
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.warning(f"Token verification failed: {e}, will acquire new token")
+        logger.info("Found valid cached token, using cached token")
+        return cached_token.token
 
     # No valid cached token, get a new one
     logger.info("Acquiring new access token with interactive authentication")
@@ -320,76 +272,3 @@ async def get_user_info() -> dict:
     except Exception as e:
         logger.error(f"Error getting user info: {e}")
         raise Exception(f"Error getting user info: {str(e)}")
-
-
-async def authenticate_new_account() -> Optional[Account]:
-    """
-    Authenticate a new account interactively using delegated access.
-    This allows the app to act on behalf of the signed-in user.
-    Uses InteractiveBrowserCredential with authorization code flow + PKCE.
-    """
-    logger.info("Starting new account authentication with delegated access")
-
-    print("\nDelegated Access Authentication:")
-    print("This will allow the app to access Microsoft Graph on your behalf.")
-    print("Opening browser for interactive authentication...")
-    print("You will be redirected to sign in with your Microsoft account.")
-    print("Requested permissions:")
-    for scope in SCOPES:
-        print(f"   - {scope}")
-    print("\nStarting authentication...")
-
-    try:
-        logger.info("Triggering interactive authentication flow")
-        # Get user info to verify authentication worked
-        # This will trigger the interactive authentication if needed
-        user_info = await get_user_info()
-
-        account = Account(
-            username=user_info["mail"] or user_info["userPrincipalName"],
-            account_id=user_info["id"],
-        )
-
-        logger.info(f"Authentication successful for account: {account.username}")
-        return account
-    except Exception as e:
-        logger.error(f"Authentication failed: {e}")
-        raise Exception(f"Authentication failed: {str(e)}")
-
-
-async def list_accounts_async() -> list[Account]:
-    """
-    List authenticated accounts. With InteractiveBrowserCredential,
-    we can only check if current authentication works.
-    """
-    logger.info("Listing authenticated accounts")
-    try:
-        user_info = await get_user_info()
-        accounts = [
-            Account(
-                username=user_info["mail"] or user_info["userPrincipalName"],
-                account_id=user_info["id"],
-            )
-        ]
-        logger.info(f"Found {len(accounts)} authenticated account(s)")
-        return accounts
-    except Exception as e:
-        logger.warning(f"Failed to list accounts: {e}")
-        return []
-
-
-def list_accounts() -> list[Account]:
-    """
-    Synchronous wrapper for list_accounts_async.
-    """
-    logger.info("Listing accounts (synchronous wrapper)")
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(list_accounts_async())
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.warning(f"Failed to list accounts: {e}")
-        return []

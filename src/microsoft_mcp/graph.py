@@ -13,14 +13,13 @@ _client = httpx.Client(timeout=30.0, follow_redirects=True)
 def request(
     method: str,
     path: str,
-    account_id: str | None = None,
     params: dict[str, Any] | None = None,
     json: dict[str, Any] | None = None,
     data: bytes | None = None,
     max_retries: int = 3,
 ) -> dict[str, Any] | None:
     headers = {
-        "Authorization": f"Bearer {get_token(account_id)}",
+        "Authorization": f"Bearer {get_token()}",
     }
 
     if method == "GET":
@@ -85,7 +84,6 @@ def request(
 
 def request_paginated(
     path: str,
-    account_id: str | None = None,
     params: dict[str, Any] | None = None,
     limit: int | None = None,
 ) -> Iterator[dict[str, Any]]:
@@ -95,9 +93,9 @@ def request_paginated(
 
     while True:
         if next_link:
-            result = request("GET", next_link.replace(BASE_URL, ""), account_id)
+            result = request("GET", next_link.replace(BASE_URL, ""))
         else:
-            result = request("GET", path, account_id, params=params)
+            result = request("GET", path, params=params)
 
         if not result:
             break
@@ -114,10 +112,8 @@ def request_paginated(
             break
 
 
-def download_raw(
-    path: str, account_id: str | None = None, max_retries: int = 3
-) -> bytes:
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+def download_raw(path: str, max_retries: int = 3) -> bytes:
+    headers = {"Authorization": f"Bearer {get_token()}"}
 
     retry_count = 0
     while retry_count <= max_retries:
@@ -200,12 +196,11 @@ def _do_chunked_upload(
 
 def create_upload_session(
     path: str,
-    account_id: str | None = None,
     item_properties: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an upload session for large files"""
     payload = {"item": item_properties or {}}
-    result = request("POST", f"{path}/createUploadSession", account_id, json=payload)
+    result = request("POST", f"{path}/createUploadSession", json=payload)
     if not result:
         raise ValueError("Failed to create upload session")
     return result
@@ -214,35 +209,32 @@ def create_upload_session(
 def upload_large_file(
     path: str,
     data: bytes,
-    account_id: str | None = None,
     item_properties: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Upload a large file using upload sessions"""
     file_size = len(data)
 
     if file_size <= UPLOAD_CHUNK_SIZE:
-        result = request("PUT", f"{path}/content", account_id, data=data)
+        result = request("PUT", f"{path}/content", data=data)
         if not result:
             raise ValueError("Failed to upload file")
         return result
 
-    session = create_upload_session(path, account_id, item_properties)
+    session = create_upload_session(path, item_properties)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def create_mail_upload_session(
     message_id: str,
     attachment_item: dict[str, Any],
-    account_id: str | None = None,
 ) -> dict[str, Any]:
     """Create an upload session for large mail attachments"""
     result = request(
         "POST",
         f"/me/messages/{message_id}/attachments/createUploadSession",
-        account_id,
         json={"AttachmentItem": attachment_item},
     )
     if not result:
@@ -254,7 +246,6 @@ def upload_large_mail_attachment(
     message_id: str,
     name: str,
     data: bytes,
-    account_id: str | None = None,
     content_type: str = "application/octet-stream",
 ) -> dict[str, Any]:
     """Upload a large mail attachment using upload sessions"""
@@ -267,25 +258,45 @@ def upload_large_mail_attachment(
         "contentType": content_type,
     }
 
-    session = create_mail_upload_session(message_id, attachment_item, account_id)
+    session = create_mail_upload_session(message_id, attachment_item)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def search_query(
     query: str,
     entity_types: list[str],
-    account_id: str | None = None,
     limit: int = 50,
     fields: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Use the modern /search/query API endpoint"""
+    # Validate entity types - Microsoft Graph search has specific requirements
+    valid_entity_types = {
+        "message",
+        "event",
+        "driveItem",
+        #"list",
+        #"listItem",
+        #"site",
+        "drive",
+        "chatMessage",
+        "person",
+        #"externalItem",
+    }
+
+    # Filter to only valid entity types
+    filtered_entity_types = [et for et in entity_types if et in valid_entity_types]
+
+    if not filtered_entity_types:
+        # If no valid entity types, return empty iterator
+        return iter([])
+
     payload = {
         "requests": [
             {
-                "entityTypes": entity_types,
+                "entityTypes": filtered_entity_types,
                 "query": {"queryString": query},
                 "size": min(limit, 25),
                 "from": 0,
@@ -293,38 +304,58 @@ def search_query(
         ]
     }
 
+    # Add fields if specified
     if fields:
         payload["requests"][0]["fields"] = fields
+
+    # Add stored fields for better results
+    payload["requests"][0]["storedFields"] = [
+        "id",
+        "name",
+        "subject",
+        "body",
+        "from",
+        "to",
+        "receivedDateTime",
+        "lastModifiedDateTime",
+        "size",
+        "contentType",
+    ]
 
     items_returned = 0
 
     while True:
-        result = request("POST", "/search/query", account_id, json=payload)
+        try:
+            result = request("POST", "/search/query", json=payload)
 
-        if not result or "value" not in result:
+            if not result or "value" not in result:
+                break
+
+            for response in result["value"]:
+                if "hitsContainers" in response:
+                    for container in response["hitsContainers"]:
+                        if "hits" in container:
+                            for hit in container["hits"]:
+                                if limit and items_returned >= limit:
+                                    return
+                                yield hit["resource"]
+                                items_returned += 1
+
+            # Check for more results
+            has_more = False
+            for response in result.get("value", []):
+                for container in response.get("hitsContainers", []):
+                    if container.get("moreResultsAvailable"):
+                        has_more = True
+                        break
+
+            if not has_more:
+                break
+
+            # Update from parameter for next batch
+            payload["requests"][0]["from"] += payload["requests"][0]["size"]
+
+        except Exception as e:
+            # Log the error and break to avoid infinite loops
+            print(f"Search query error: {e}")
             break
-
-        for response in result["value"]:
-            if "hitsContainers" in response:
-                for container in response["hitsContainers"]:
-                    if "hits" in container:
-                        for hit in container["hits"]:
-                            if limit and items_returned >= limit:
-                                return
-                            yield hit["resource"]
-                            items_returned += 1
-
-        if "@odata.nextLink" in result:
-            break
-
-        has_more = False
-        for response in result.get("value", []):
-            for container in response.get("hitsContainers", []):
-                if container.get("moreResultsAvailable"):
-                    has_more = True
-                    break
-
-        if not has_more:
-            break
-
-        payload["requests"][0]["from"] += payload["requests"][0]["size"]
