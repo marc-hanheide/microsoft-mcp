@@ -122,6 +122,9 @@ uv sync
 # Set your Azure app ID
 export MICROSOFT_MCP_CLIENT_ID="your-app-id-here"
 
+# Optional: Set custom redirect URI for non-localhost deployments
+# export MICROSOFT_MCP_REDIRECT_URI="https://your-app.azurewebsites.net/auth/callback"
+
 # Run authentication script
 uv run authenticate.py
 
@@ -142,7 +145,8 @@ Add to your Claude Desktop configuration:
       "command": "uvx",
       "args": ["--from", "git+https://github.com/elyxlz/microsoft-mcp.git", "microsoft-mcp"],
       "env": {
-        "MICROSOFT_MCP_CLIENT_ID": "your-app-id-here"
+        "MICROSOFT_MCP_CLIENT_ID": "your-app-id-here",
+        "MICROSOFT_MCP_REDIRECT_URI": "https://your-app.azurewebsites.net/auth/callback"
       }
     }
   }
@@ -158,7 +162,8 @@ Or for local development:
       "command": "uv",
       "args": ["--directory", "/path/to/microsoft-mcp", "run", "microsoft-mcp"],
       "env": {
-        "MICROSOFT_MCP_CLIENT_ID": "your-app-id-here"
+        "MICROSOFT_MCP_CLIENT_ID": "your-app-id-here",
+        "MICROSOFT_MCP_REDIRECT_URI": "https://your-app.azurewebsites.net/auth/callback"
       }
     }
   }

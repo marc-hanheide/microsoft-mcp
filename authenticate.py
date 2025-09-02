@@ -26,16 +26,29 @@ async def main():
         print("export MICROSOFT_MCP_CLIENT_ID='your-app-id'")
         print("\nNote: This should be the Application (client) ID from your")
         print("Azure AD app registration configured for delegated access.")
+        print("\nOptional environment variables:")
+        print("- MICROSOFT_MCP_TENANT_ID: Tenant ID (defaults to 'common')")
+        print(
+            "- MICROSOFT_MCP_REDIRECT_URI: Custom redirect URI for non-localhost deployments"
+        )
         sys.exit(1)
 
     print("Microsoft MCP Delegated Access Authentication")
     print("============================================")
     print("This tool will authenticate using delegated access, allowing")
     print("the app to access Microsoft Graph on behalf of signed-in users.")
-    print("Authentication will open a browser window for sign-in.\n")
+    print("Authentication will open a browser window for sign-in.")
+
+    # Show configuration info
+    redirect_uri = os.getenv("MICROSOFT_MCP_REDIRECT_URI")
+    if redirect_uri:
+        print(f"Using custom redirect URI: {redirect_uri}")
+    else:
+        print("Using default localhost redirect URI")
+    print()
 
     # List current accounts
-    accounts = auth.list_accounts()
+    accounts = await auth.list_accounts_async()
     if accounts:
         print("Currently authenticated accounts:")
         for i, account in enumerate(accounts, 1):
@@ -72,7 +85,7 @@ async def main():
             print("Please enter 'y' or 'n'")
 
     # Final account summary
-    accounts = auth.list_accounts()
+    accounts = await auth.list_accounts_async()
     if accounts:
         print("\nAuthenticated accounts summary:")
         print("==============================")

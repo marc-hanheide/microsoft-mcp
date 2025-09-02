@@ -33,6 +33,7 @@ Requirements:
 - Azure AD app registration with public client flow enabled
 - Delegated permissions configured in Azure AD
 - MICROSOFT_MCP_CLIENT_ID and MICROSOFT_MCP_TENANT_ID environment variables
+- MICROSOFT_MCP_REDIRECT_URI environment variable (optional, for non-localhost deployments)
 - Web browser available for interactive authentication
 """
 
@@ -49,13 +50,13 @@ load_dotenv()
 # These match the scopes used in your working example.py
 SCOPES = [
     "User.Read",
-    "User.ReadBasic.All", 
+    "User.ReadBasic.All",
     "Mail.Read",
     "Mail.Send",
     "Team.ReadBasic.All",
     "TeamMember.ReadWrite.All",
     "Calendars.Read",
-    "Files.Read"
+    "Files.Read",
 ]
 
 
@@ -74,33 +75,38 @@ def get_credential() -> InteractiveBrowserCredential:
         raise ValueError("MICROSOFT_MCP_CLIENT_ID environment variable is required")
 
     tenant_id = os.getenv("MICROSOFT_MCP_TENANT_ID", "common")
-    
-    credential = InteractiveBrowserCredential(
-        client_id=client_id,
-        tenant_id=tenant_id,
-    )
-    
+    redirect_uri = os.getenv("MICROSOFT_MCP_REDIRECT_URI")
+
+    # Configure credential with optional redirect URI
+    credential_kwargs = {
+        "client_id": client_id,
+        "tenant_id": tenant_id,
+    }
+
+    # Add redirect_uri if specified (for non-localhost deployments)
+    if redirect_uri:
+        credential_kwargs["redirect_uri"] = redirect_uri
+
+    credential = InteractiveBrowserCredential(**credential_kwargs)
+
     return credential
 
 
 def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
     """
     Get a configured Microsoft Graph client for delegated access.
-    
+
     Args:
         scopes: Custom scopes to request. If None, uses default SCOPES.
-    
+
     Returns:
         GraphServiceClient configured for delegated access.
     """
     credential = get_credential()
     requested_scopes = scopes or SCOPES
-    
-    client = GraphServiceClient(
-        credentials=credential, 
-        scopes=requested_scopes
-    )
-    
+
+    client = GraphServiceClient(credentials=credential, scopes=requested_scopes)
+
     return client
 
 
@@ -108,12 +114,12 @@ async def get_user_info() -> dict:
     """
     Get user information using delegated access.
     This demonstrates accessing user data on behalf of the signed-in user.
-    
+
     Returns:
         Dictionary containing user information from Microsoft Graph /me endpoint.
     """
     client = get_graph_client(scopes=["User.Read"])
-    
+
     try:
         me = await client.me.get()
         if me:
@@ -124,7 +130,7 @@ async def get_user_info() -> dict:
                 "id": me.id,
                 "userPrincipalName": me.user_principal_name,
                 "givenName": me.given_name,
-                "surname": me.surname
+                "surname": me.surname,
             }
         else:
             raise Exception("Failed to retrieve user information")
@@ -146,15 +152,15 @@ async def authenticate_new_account() -> Optional[Account]:
     for scope in SCOPES:
         print(f"   - {scope}")
     print("\nStarting authentication...")
-    
+
     try:
         # Get user info to verify authentication worked
         # This will trigger the interactive authentication if needed
         user_info = await get_user_info()
-        
+
         return Account(
             username=user_info["mail"] or user_info["userPrincipalName"],
-            account_id=user_info["id"]
+            account_id=user_info["id"],
         )
     except Exception as e:
         raise Exception(f"Authentication failed: {str(e)}")
@@ -162,15 +168,17 @@ async def authenticate_new_account() -> Optional[Account]:
 
 async def list_accounts_async() -> list[Account]:
     """
-    List authenticated accounts. With InteractiveBrowserCredential, 
+    List authenticated accounts. With InteractiveBrowserCredential,
     we can only check if current authentication works.
     """
     try:
         user_info = await get_user_info()
-        return [Account(
-            username=user_info["mail"] or user_info["userPrincipalName"],
-            account_id=user_info["id"]
-        )]
+        return [
+            Account(
+                username=user_info["mail"] or user_info["userPrincipalName"],
+                account_id=user_info["id"],
+            )
+        ]
     except:
         return []
 
@@ -186,5 +194,5 @@ def list_accounts() -> list[Account]:
             return loop.run_until_complete(list_accounts_async())
         finally:
             loop.close()
-    except:
+    except Exception:
         return []
