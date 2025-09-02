@@ -73,14 +73,14 @@ SCOPES = [
     "User.Read",
     "User.ReadBasic.All",
     "Chat.Read",
-    #"ChannelMessage.Read",
+    # "ChannelMessage.Read",
     "Mail.Read",
     "Team.ReadBasic.All",
     "TeamMember.ReadWrite.All",
     "Calendars.Read",
     "Files.Read",
-    #"Sites.Read.All"
-    #"ChannelMessage.Read"
+    # "Sites.Read.All"
+    # "ChannelMessage.Read"
 ]
 
 
@@ -189,6 +189,14 @@ def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
     return client
 
 
+def exists_valid_token() -> bool:
+    """
+    Check if a valid access token exists in the cache.
+    """
+    cached_token = _read_token_cache()
+    return _is_token_valid(cached_token) if cached_token else False
+
+
 def get_token() -> str:
     """
     Get an access token for Microsoft Graph API calls with caching.
@@ -239,36 +247,3 @@ def clear_token_cache() -> None:
         logger.warning(f"Failed to clear token cache: {e}")
 
 
-async def get_user_info() -> dict:
-    """
-    Get user information using delegated access.
-    This demonstrates accessing user data on behalf of the signed-in user.
-
-    Returns:
-        Dictionary containing user information from Microsoft Graph /me endpoint.
-    """
-    logger.info("Retrieving user information from Microsoft Graph")
-    client = get_graph_client(scopes=["User.Read"])
-
-    try:
-        me = await client.me.get()
-        if me:
-            user_info = {
-                "displayName": me.display_name,
-                "mail": me.mail or me.user_principal_name,
-                "jobTitle": me.job_title,
-                "id": me.id,
-                "userPrincipalName": me.user_principal_name,
-                "givenName": me.given_name,
-                "surname": me.surname,
-            }
-            logger.info(
-                f"User information retrieved successfully for: {user_info.get('mail', 'unknown')}"
-            )
-            return user_info
-        else:
-            logger.error("Failed to retrieve user information: empty response")
-            raise Exception("Failed to retrieve user information")
-    except Exception as e:
-        logger.error(f"Error getting user info: {e}")
-        raise Exception(f"Error getting user info: {str(e)}")

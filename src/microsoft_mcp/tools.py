@@ -10,7 +10,7 @@ from . import graph, auth
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-mcp = FastMCP("microsoft-mcp")
+mcp = FastMCP("microsoft-graph-mcp")
 
 FOLDERS = {
     k.casefold(): v
@@ -23,6 +23,30 @@ FOLDERS = {
         "archive": "archive",
     }.items()
 }
+
+
+@mcp.tool
+def is_logged_in() -> bool:
+    return auth.exists_valid_token()
+
+@mcp.tool
+def login() -> str:
+    """Ensure the user is authenticated and return user info. 
+    Raises an error if authentication fails.
+
+    `login` is required before any other tools can succeed.
+    """
+
+    if not auth.exists_valid_token():
+        try:
+            auth.get_token()
+            return "logged in"
+        except Exception as e:
+            logger.error(f"login failed: {str(e)}", exc_info=True)
+            raise RuntimeError("Login failed, please check authentication settings.")
+        
+    else:
+        return "already logged in"
 
 
 @mcp.tool
@@ -687,6 +711,7 @@ def search_emails(
     Examples:
         - search_emails("project alpha") - Find emails about "project alpha" anywhere
         - search_emails("meeting", folder="inbox") - Find meeting emails only in inbox
+        - search_emails("emails received today") - Finds emails from today
         - search_emails("john.doe@company.com") - Find emails from/to specific person
         - search_emails("budget approval") - Find emails about budget approvals
     """
