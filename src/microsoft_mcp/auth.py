@@ -83,6 +83,21 @@ SCOPES = [
     # "ChannelMessage.Read"
 ]
 
+# Scopes useful for full search:
+    # Chat.Read
+    # ChannelMessage.Read.All
+    # Mail.Read
+    # Calendars.Read
+    # Files.Read.All
+    # Sites.Read.All
+    # User.Read
+    # User.ReadBasic.All
+    # Team.ReadBasic.All
+    # TeamMember.ReadWrite.All
+
+
+
+
 
 class CachedToken(NamedTuple):
     """Cached access token with expiration time"""
