@@ -2,6 +2,7 @@ import base64
 import datetime as dt
 import logging
 import pathlib as pl
+import subprocess
 from typing import Any
 from fastmcp import FastMCP
 from . import graph
@@ -30,6 +31,62 @@ FOLDERS = {
         "archive": "archive",
     }.items()
 }
+
+
+@mcp.tool
+def get_user_details(email: str | None = None) -> dict[str, Any]:
+    """Get details about a user - either the logged-in user or another user by email address.
+
+    Retrieves user profile information including display name, email, job title, department,
+    office location, and other directory information. When no email is provided, returns
+    details for the currently signed-in user. When an email is provided, looks up that
+    specific user's public profile information.
+
+    Args:
+        email: Optional email address of the user to look up. If None, returns current user's details.
+               Must be a valid email address format (e.g., "user@company.com").
+
+    Returns:
+        User object containing profile information:
+        - Basic info: id, displayName, mail, userPrincipalName, givenName, surname
+        - Professional: jobTitle, department, companyName, officeLocation, businessPhones
+        - Directory info: accountEnabled, userType, createdDateTime
+        - When looking up other users, some fields may be limited based on directory permissions
+
+    Examples:
+        - get_user_details() - Get current user's profile information
+        - get_user_details("colleague@company.com") - Look up specific user's profile
+        - get_user_details("manager@company.com") - Get manager's contact information
+
+    Note: Looking up other users requires User.ReadBasic.All permission and the target
+    user must be visible in your organization's directory.
+    """
+    logger.info(f"get_user_details called: email={email}")
+
+    try:
+        if email is None:
+            # Get current user's details
+            result = graph.request("GET", "/me")
+            logger.info("get_user_details successful: retrieved current user details")
+        else:
+            # Look up user by email address
+            # Use the /users/{email} endpoint to get user by their email/UPN
+            result = graph.request("GET", f"/users/{email}")
+            if not result:
+                logger.error(
+                    f"get_user_details failed: User with email {email} not found"
+                )
+                raise ValueError(f"User with email {email} not found")
+            logger.info(
+                f"get_user_details successful: retrieved details for user {email}"
+            )
+
+        return result
+    except Exception as e:
+        logger.error(
+            f"get_user_details failed for email={email}: {str(e)}", exc_info=True
+        )
+        raise
 
 
 @mcp.tool
