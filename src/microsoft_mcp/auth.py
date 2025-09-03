@@ -1,52 +1,37 @@
 """
 Microsoft Graph Authentication Module - Delegated Access
 
-This module implements delegated access authentication for Microsoft Graph API.
+This module implements simplified delegated access authentication for Microsoft Graph API.
 Delegated access allows the application to act on behalf of a signed-in user,
 accessing only the data that the user has permission to access.
 
 Key Features:
 - Uses azure.identity.InteractiveBrowserCredential for modern authentication
-- Implements interactive authentication with authorization code flow + PKCE
-- Requests specific delegated permissions (scopes) rather than broad access
-- Supports token caching automatically through azure.identity
-- Additional token caching at application level for improved performance
-- Background token refresh service to prevent token expiration
+- Leverages Azure SDK's built-in token caching and refresh token handling
+- Uses AuthenticationRecord for persistent authentication across sessions
+- No manual token management or background refresh services needed
 - Works seamlessly with msgraph.GraphServiceClient
 
 Authentication Flow:
-- Uses InteractiveBrowserCredential which opens a browser for user sign-in
-- Implements PKCE (Proof Key for Code Exchange) for security
-- No special permissions required (unlike device flow)
-- Handles token refresh automatically
-- Caches tokens locally to avoid unnecessary re-authentication
+- Uses InteractiveBrowserCredential with persistent token cache
+- First authentication saves an AuthenticationRecord to ~/.azure-graph-auth.json
+- Subsequent runs use the saved AuthenticationRecord for silent authentication
+- Azure SDK handles all token refresh automatically
 
 Token Caching:
-- Tokens are cached in ~/.microsoft_mcp_delegated_token_cache.json
-- Cached tokens are validated before use (5-minute expiration buffer)
-- Additional API verification ensures tokens are actually valid
-- Invalid/expired tokens trigger automatic re-authentication
-- Cache can be cleared manually using clear_token_cache()
-
-Background Token Refresh:
-- Automatic background refresh service starts when tokens are first obtained
-- Refreshes tokens 1 hour before expiration (configurable via REFRESH_BUFFER_SECONDS)
-- Checks for refresh needs every 5 minutes (configurable via REFRESH_CHECK_INTERVAL)
-- Uses shared credential instance for silent refresh without user interaction
-- Leverages Azure Identity's internal token cache and refresh token mechanism
-- Falls back to interactive authentication if silent refresh fails
-- Service runs as daemon thread and stops automatically on program exit
+- Tokens are cached by Azure SDK using platform-specific secure storage
+- AuthenticationRecord enables silent authentication across application restarts
+- No manual token validation or refresh needed
 
 Delegated Permissions Used:
 - User.Read: Read the signed-in user's profile
 - User.ReadBasic.All: Read basic info of all users
+- Chat.Read: Read user's chat messages
 - Mail.Read: Read user's mail
-- Mail.Send: Send mail as user
 - Team.ReadBasic.All: Read basic team information
 - TeamMember.ReadWrite.All: Read and write team membership
-
-This is different from "app-only access" where the app acts with its own identity
-and requires application permissions rather than delegated permissions.
+- Calendars.Read: Read user's calendar
+- Files.Read: Read user's files
 
 Requirements:
 - Azure AD app registration with public client flow enabled
@@ -57,19 +42,15 @@ Requirements:
 """
 
 import os
-import asyncio
 import json
-import time
 import logging
-import threading
-import atexit
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Optional
 from dotenv import load_dotenv
 from azure.identity import (
     InteractiveBrowserCredential,
-    SharedTokenCacheCredential,
     TokenCachePersistenceOptions,
+    AuthenticationRecord,
 )
 from azure.core.credentials import AccessToken
 from msgraph import GraphServiceClient
@@ -81,19 +62,15 @@ logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
 # Delegated permissions (scopes) for accessing user data on behalf of the signed-in user
-# These match the scopes used in your working example.py
 SCOPES = [
     "User.Read",
     "User.ReadBasic.All",
     "Chat.Read",
-    # "ChannelMessage.Read",
     "Mail.Read",
     "Team.ReadBasic.All",
     "TeamMember.ReadWrite.All",
     "Calendars.Read",
     "Files.Read",
-    # "Sites.Read.All"
-    # "ChannelMessage.Read"
 ]
 
 # Scopes useful for full search:
@@ -109,196 +86,63 @@ SCOPES = [
 # TeamMember.ReadWrite.All
 
 
-class CachedToken(NamedTuple):
-    """Cached access token with expiration time"""
-
-    token: str
-    expires_on: float  # Unix timestamp
-
-
 class AzureAuthentication:
     """
-    Azure Authentication class for Microsoft Graph API with delegated access.
+    Simplified Azure Authentication class for Microsoft Graph API with delegated access.
 
-    This class encapsulates all authentication functionality including token caching,
-    background refresh service, and credential management.
+    This class leverages Azure SDK's built-in token caching and AuthenticationRecord
+    functionality to provide seamless authentication across application restarts.
     """
 
     def __init__(
         self,
-        token_cache_file: Optional[Path] = None,
-        refresh_buffer_seconds: int = 3600,
-        refresh_check_interval: int = 300,
+        auth_record_file: Optional[Path] = None,
     ):
         """
         Initialize the Azure Authentication instance.
 
         Args:
-            token_cache_file: Path to token cache file (defaults to ~/.microsoft_mcp_delegated_token_cache.json)
-            refresh_buffer_seconds: Refresh token this many seconds before expiration (default 1 hour)
-            refresh_check_interval: Check for refresh needs every N seconds (default 5 minutes)
+            auth_record_file: Path to AuthenticationRecord file (defaults to ~/.azure-graph-auth.json)
         """
-        self.token_cache_file = token_cache_file or (
-            Path.home() / ".microsoft_mcp_delegated_token_cache.json"
+        self.auth_record_file = auth_record_file or (
+            Path.home() / ".azure-graph-auth.json"
         )
-        self.refresh_buffer_seconds = refresh_buffer_seconds
-        self.refresh_check_interval = refresh_check_interval
-
-        # Instance variables replacing global variables
-        self._refresh_thread = None
-        self._refresh_thread_stop = False
         self._credential_instance = None
 
-        # Register cleanup function
-        atexit.register(self.stop_token_refresh_service)
-
-    def _read_token_cache(self) -> Optional[CachedToken]:
-        """Read cached token from file"""
+    def _read_auth_record(self) -> Optional[AuthenticationRecord]:
+        """Read AuthenticationRecord from file"""
         try:
-            if self.token_cache_file.exists():
-                logger.info("Reading token from cache file")
-                with open(self.token_cache_file, "r") as f:
-                    data = json.load(f)
-                    cached_token = CachedToken(
-                        token=data["token"], expires_on=data["expires_on"]
+            if self.auth_record_file.exists():
+                logger.info("Reading AuthenticationRecord from file")
+                with open(self.auth_record_file, "r") as f:
+                    auth_record_data = json.load(f)
+                    auth_record = AuthenticationRecord.deserialize(
+                        json.dumps(auth_record_data)
                     )
-                    logger.info(
-                        f"Token cache found, expires at {time.ctime(cached_token.expires_on)}"
-                    )
-                    return cached_token
+                    logger.info("AuthenticationRecord loaded successfully")
+                    return auth_record
             else:
-                logger.info("No token cache file found")
-        except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Failed to read token cache: {e}")
+                logger.info("No AuthenticationRecord file found")
+        except Exception as e:
+            logger.warning(f"Failed to read AuthenticationRecord: {e}")
         return None
 
-    def _write_token_cache(self, token: str, expires_on: float) -> None:
-        """Write token to cache file"""
+    def _write_auth_record(self, auth_record: AuthenticationRecord) -> None:
+        """Write AuthenticationRecord to file"""
         try:
-            self.token_cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.token_cache_file, "w") as f:
-                json.dump({"token": token, "expires_on": expires_on}, f)
-            logger.info(
-                f"Token cached successfully, expires at {time.ctime(expires_on)}"
-            )
+            self.auth_record_file.parent.mkdir(parents=True, exist_ok=True)
+            auth_record_data = json.loads(auth_record.serialize())
+
+            with open(self.auth_record_file, "w") as f:
+                json.dump(auth_record_data, f, indent=2)
+            logger.info("AuthenticationRecord saved successfully")
         except Exception as e:
-            logger.warning(f"Failed to write token cache: {e}")
-
-    def _is_token_valid(self, cached_token: CachedToken) -> bool:
-        """Check if cached token is still valid (with 5-minute buffer)"""
-        current_time = time.time()
-        buffer_time = 300  # 5 minutes buffer
-        is_valid = cached_token.expires_on > (current_time + buffer_time)
-        logger.info(
-            f"Token validity check: {'valid' if is_valid else 'expired'} (expires: {time.ctime(cached_token.expires_on)})"
-        )
-        return is_valid
-
-    def _needs_refresh(self, cached_token: CachedToken) -> bool:
-        """Check if cached token needs refresh (within refresh buffer time)"""
-        current_time = time.time()
-        needs_refresh = cached_token.expires_on <= (
-            current_time + self.refresh_buffer_seconds
-        )
-        if needs_refresh:
-            logger.info(
-                f"Token needs refresh: expires at {time.ctime(cached_token.expires_on)}, "
-                f"refresh buffer is {self.refresh_buffer_seconds} seconds"
-            )
-        return needs_refresh
-
-    def _refresh_token_silently(self) -> bool:
-        """
-        Attempt to refresh the token silently using the cached credential.
-        Returns True if successful, False otherwise.
-        """
-        try:
-            logger.info("Attempting silent token refresh")
-
-            # Use the existing credential instance if available
-            if self._credential_instance is None:
-                logger.warning("No credential instance available for silent refresh")
-                return False
-
-            # Try to get a new token using cached authentication
-            # This should use the credential's internal cache and refresh token
-            token: AccessToken = self._credential_instance.get_token(*SCOPES)
-
-            logger.info("Silent token refresh successful")
-            self._write_token_cache(token.token, token.expires_on)
-            return True
-
-        except Exception as e:
-            logger.warning(f"Silent token refresh failed: {e}")
-            return False
-
-    def _token_refresh_worker(self):
-        """Background worker thread that checks and refreshes tokens"""
-        logger.info("Token refresh worker thread started")
-
-        while not self._refresh_thread_stop:
-            try:
-                # Check if we have a cached token that needs refresh
-                cached_token = self._read_token_cache()
-                if cached_token and self._needs_refresh(cached_token):
-                    logger.info("Token refresh needed, attempting silent refresh")
-
-                    if self._refresh_token_silently():
-                        logger.info("Token refreshed successfully in background")
-                    else:
-                        logger.warning(
-                            "Background token refresh failed - will require interactive authentication on next use"
-                        )
-
-                # Sleep for the check interval or until stop is requested
-                for _ in range(self.refresh_check_interval):
-                    if self._refresh_thread_stop:
-                        break
-                    time.sleep(1)
-
-            except Exception as e:
-                logger.error(f"Error in token refresh worker: {e}")
-                # Continue running even if there's an error
-                time.sleep(self.refresh_check_interval)
-
-        logger.info("Token refresh worker thread stopped")
-
-    def start_token_refresh_service(self):
-        """Start the background token refresh service"""
-        if self._refresh_thread is not None and self._refresh_thread.is_alive():
-            logger.info("Token refresh service is already running")
-            return
-
-        logger.info("Starting token refresh service")
-        self._refresh_thread_stop = False
-        self._refresh_thread = threading.Thread(
-            target=self._token_refresh_worker, daemon=True
-        )
-        self._refresh_thread.start()
-
-    def stop_token_refresh_service(self):
-        """Stop the background token refresh service"""
-        if self._refresh_thread is None or not self._refresh_thread.is_alive():
-            return
-
-        logger.info("Stopping token refresh service")
-        self._refresh_thread_stop = True
-
-        # Wait for thread to finish (with timeout)
-        if self._refresh_thread.is_alive():
-            self._refresh_thread.join(timeout=5)
-            if self._refresh_thread.is_alive():
-                logger.warning("Token refresh thread did not stop within timeout")
-
-    def is_token_refresh_service_running(self) -> bool:
-        """Check if the token refresh service is currently running"""
-        return self._refresh_thread is not None and self._refresh_thread.is_alive()
+            logger.warning(f"Failed to write AuthenticationRecord: {e}")
 
     def get_credential(self) -> InteractiveBrowserCredential:
         """
         Create and configure InteractiveBrowserCredential for delegated access.
-        This credential handles the interactive authentication flow automatically.
-        Returns a shared instance for token refresh purposes.
+        Uses persistent token cache and AuthenticationRecord for seamless re-authentication.
         """
         # Return existing instance if available
         if self._credential_instance is not None:
@@ -318,18 +162,25 @@ class AzureAuthentication:
         logger.info(f"Using tenant ID: {tenant_id}")
         if redirect_uri:
             logger.info(f"Using custom redirect URI: {redirect_uri}")
-        else:
-            logger.info("Using default localhost redirect URI")
 
-        # Configure credential with optional redirect URI
+        # Configure persistent token cache
         token_cache = TokenCachePersistenceOptions(
             allow_unencrypted_storage=True, name="microsoft_mcp_delegated_token_cache"
         )
+
+        # Try to load existing AuthenticationRecord
+        auth_record = self._read_auth_record()
+
         credential_kwargs = {
             "client_id": client_id,
             "tenant_id": tenant_id,
             "cache_persistence_options": token_cache,
         }
+
+        # Add existing authentication record if available
+        if auth_record:
+            credential_kwargs["authentication_record"] = auth_record
+            logger.info("Using existing AuthenticationRecord for silent authentication")
 
         # Add redirect_uri if specified (for non-localhost deployments)
         if redirect_uri:
@@ -339,6 +190,115 @@ class AzureAuthentication:
         logger.info("InteractiveBrowserCredential created successfully")
 
         return self._credential_instance
+
+    def authenticate(self) -> AuthenticationRecord:
+        """
+        Perform interactive authentication and save AuthenticationRecord for future use.
+        This method should be called at least once to establish the authentication record.
+        """
+        logger.info("Performing interactive authentication")
+        credential = self.get_credential()
+
+        # Authenticate and get the AuthenticationRecord
+        auth_record = credential.authenticate(scopes=SCOPES)
+
+        # Save the AuthenticationRecord for future use
+        self._write_auth_record(auth_record)
+
+        logger.info("Authentication completed and record saved")
+        return auth_record
+
+    def get_token_with_details(self) -> tuple[str, int]:
+        """
+        Get an access token along with its expiration timestamp.
+        Uses Azure SDK's built-in caching and refresh token handling.
+
+        Returns:
+            Tuple of (token_string, expires_on_timestamp)
+        """
+        logger.info("Requesting access token with details for Microsoft Graph API")
+
+        credential = self.get_credential()
+
+        try:
+            logger.info(f"Requesting token for scopes: {', '.join(SCOPES)}")
+            token: AccessToken = credential.get_token(*SCOPES)
+
+            logger.info("Access token acquired successfully")
+            return token.token, token.expires_on
+
+        except Exception as e:
+            logger.error(f"Failed to acquire access token: {e}")
+            # If authentication fails and we don't have an auth record, try interactive auth
+            if not self.auth_record_file.exists():
+                logger.info(
+                    "No AuthenticationRecord found, attempting interactive authentication"
+                )
+                try:
+                    self.authenticate()
+                    # Retry token acquisition after authentication
+                    token: AccessToken = credential.get_token(*SCOPES)
+                    logger.info(
+                        "Access token acquired after interactive authentication"
+                    )
+                    return token.token, token.expires_on
+                except Exception as retry_e:
+                    logger.error(
+                        f"Failed to acquire token after interactive authentication: {retry_e}"
+                    )
+                    raise
+            else:
+                # Auth record exists but token acquisition failed, clear cache and retry
+                logger.info("Clearing cached data and retrying authentication")
+                self.clear_cache()
+                self._credential_instance = None
+                raise Exception(f"Failed to acquire access token: {str(e)}")
+
+    def get_token(self) -> str:
+        """
+        Get an access token for Microsoft Graph API calls.
+        Uses Azure SDK's built-in caching and refresh token handling.
+
+        Returns:
+            Valid access token for Microsoft Graph API.
+        """
+        logger.info("Requesting access token for Microsoft Graph API")
+
+        credential = self.get_credential()
+
+        try:
+            logger.info(f"Requesting token for scopes: {', '.join(SCOPES)}")
+            token: AccessToken = credential.get_token(*SCOPES)
+
+            logger.info("Access token acquired successfully")
+            return token.token
+
+        except Exception as e:
+            logger.error(f"Failed to acquire access token: {e}")
+            # If authentication fails and we don't have an auth record, try interactive auth
+            if not self.auth_record_file.exists():
+                logger.info(
+                    "No AuthenticationRecord found, attempting interactive authentication"
+                )
+                try:
+                    self.authenticate()
+                    # Retry token acquisition after authentication
+                    token: AccessToken = credential.get_token(*SCOPES)
+                    logger.info(
+                        "Access token acquired after interactive authentication"
+                    )
+                    return token.token
+                except Exception as retry_e:
+                    logger.error(
+                        f"Failed to acquire token after interactive authentication: {retry_e}"
+                    )
+                    raise
+            else:
+                # Auth record exists but token acquisition failed, clear cache and retry
+                logger.info("Clearing cached data and retrying authentication")
+                self.clear_cache()
+                self._credential_instance = None
+                raise Exception(f"Failed to acquire access token: {str(e)}")
 
     def get_graph_client(
         self, scopes: Optional[list[str]] = None
@@ -356,78 +316,39 @@ class AzureAuthentication:
         requested_scopes = scopes or SCOPES
 
         client = GraphServiceClient(credentials=credential, scopes=requested_scopes)
-
         return client
 
     def exists_valid_token(self) -> bool:
         """
-        Check if a valid access token exists in the cache.
+        Check if a valid access token can be obtained silently.
+        This doesn't guarantee the token is valid, but indicates if silent auth is possible.
         """
-        cached_token = self._read_token_cache()
-        return self._is_token_valid(cached_token) if cached_token else False
-
-    def get_token(self) -> str:
-        """
-        Get an access token for Microsoft Graph API calls with caching.
-
-        Returns:
-            Valid access token for Microsoft Graph API.
-        """
-        logger.info("Requesting access token for Microsoft Graph API")
-
-        # Check if we have a cached token that hasn't expired
-        cached_token = self._read_token_cache()
-        if cached_token and self._is_token_valid(cached_token):
-            logger.info("Found valid cached token, using cached token")
-
-            # Start refresh service if not already running
-            if not self.is_token_refresh_service_running():
-                self.start_token_refresh_service()
-
-            return cached_token.token
-
-        # No valid cached token, get a new one
-        logger.info("Acquiring new access token with interactive authentication")
-        credential = self.get_credential()
-
         try:
-            logger.info(f"Requesting token for scopes: {', '.join(SCOPES)}")
-            # Get token for specific Microsoft Graph scopes
+            if not self.auth_record_file.exists():
+                return False
+
+            credential = self.get_credential()
+            # Try to get a token silently
             token: AccessToken = credential.get_token(*SCOPES)
+            return token is not None
+        except Exception:
+            return False
 
-            logger.info("Access token acquired successfully")
-            # Cache the new token
-            self._write_token_cache(token.token, token.expires_on)
-
-            # Start refresh service if not already running
-            if not self.is_token_refresh_service_running():
-                self.start_token_refresh_service()
-
-            return token.token
-        except Exception as e:
-            logger.error(f"Failed to acquire access token: {e}")
-            # If token acquisition fails, try to clear cache and credential instance
-            if self.token_cache_file.exists():
-                logger.info("Clearing token cache due to authentication failure")
-                self.token_cache_file.unlink()
-            self.clear_credential_cache()
-            raise Exception(f"Failed to acquire access token: {str(e)}")
-
-    def clear_token_cache(self) -> None:
-        """Clear the cached token to force re-authentication"""
+    def clear_cache(self) -> None:
+        """Clear the AuthenticationRecord and force re-authentication"""
         try:
-            if self.token_cache_file.exists():
-                self.token_cache_file.unlink()
-                logger.info("Token cache cleared successfully")
+            if self.auth_record_file.exists():
+                self.auth_record_file.unlink()
+                logger.info("AuthenticationRecord cleared successfully")
             else:
-                logger.info("No token cache file to clear")
+                logger.info("No AuthenticationRecord file to clear")
 
-            # Also clear the credential instance to force new authentication
+            # Clear the credential instance to force new authentication
             self._credential_instance = None
             logger.info("Credential instance cleared")
 
         except Exception as e:
-            logger.warning(f"Failed to clear token cache: {e}")
+            logger.warning(f"Failed to clear cache: {e}")
 
     def clear_credential_cache(self) -> None:
         """Clear the credential instance to force re-authentication"""
@@ -458,6 +379,11 @@ def get_token() -> str:
     return get_auth_instance().get_token()
 
 
+def get_token_with_details() -> tuple[str, int]:
+    """Get an access token along with its expiration timestamp."""
+    return get_auth_instance().get_token_with_details()
+
+
 def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
     """Get a configured Microsoft Graph client for delegated access."""
     return get_auth_instance().get_graph_client(scopes)
@@ -470,7 +396,7 @@ def get_credential() -> InteractiveBrowserCredential:
 
 def clear_token_cache() -> None:
     """Clear the cached token to force re-authentication"""
-    get_auth_instance().clear_token_cache()
+    get_auth_instance().clear_cache()
 
 
 def clear_credential_cache() -> None:
@@ -478,16 +404,29 @@ def clear_credential_cache() -> None:
     get_auth_instance().clear_credential_cache()
 
 
+def authenticate() -> AuthenticationRecord:
+    """Perform interactive authentication and save AuthenticationRecord for future use."""
+    return get_auth_instance().authenticate()
+
+
+# Deprecated functions (kept for backward compatibility)
 def start_token_refresh_service():
-    """Start the background token refresh service"""
-    get_auth_instance().start_token_refresh_service()
+    """Deprecated: Token refresh is now handled automatically by Azure SDK"""
+    logger.warning(
+        "start_token_refresh_service is deprecated - token refresh is handled automatically"
+    )
 
 
 def stop_token_refresh_service():
-    """Stop the background token refresh service"""
-    get_auth_instance().stop_token_refresh_service()
+    """Deprecated: Token refresh is now handled automatically by Azure SDK"""
+    logger.warning(
+        "stop_token_refresh_service is deprecated - token refresh is handled automatically"
+    )
 
 
 def is_token_refresh_service_running() -> bool:
-    """Check if the token refresh service is currently running"""
-    return get_auth_instance().is_token_refresh_service_running()
+    """Deprecated: Token refresh is now handled automatically by Azure SDK"""
+    logger.warning(
+        "is_token_refresh_service_running is deprecated - token refresh is handled automatically"
+    )
+    return True  # Always return True since Azure SDK handles refresh automatically

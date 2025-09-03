@@ -11,38 +11,34 @@ Microsoft MCP is a comprehensive MCP server that provides AI assistants with sea
 ### Core Components
 
 #### 1. Authentication System (`auth.py`)
-- **Object-Oriented Design**: `AzureAuthentication` class encapsulates all authentication functionality
+- **Simplified Design**: `AzureAuthentication` class leverages Azure SDK's built-in capabilities
+- **Azure SDK Integration**: Uses Azure Identity's automatic token caching and refresh token handling
+- **AuthenticationRecord**: Persistent authentication across sessions using `~/.azure-graph-auth.json`
 - **Delegated Access**: Uses Azure Identity's `InteractiveBrowserCredential` for user authentication
 - **Modern Authentication Flow**: Implements authorization code flow with PKCE (Proof Key for Code Exchange)
-- **Token Caching**: Two-level caching system:
-  - Azure Identity automatic caching
-  - Application-level token cache (`~/.microsoft_mcp_delegated_token_cache.json`)
-- **Background Token Refresh**: Automatic token refresh service that runs in a separate thread:
-  - Refreshes tokens 1 hour before expiration (configurable)
-  - Checks every 5 minutes for tokens that need refresh
-  - Uses shared credential instance for silent refresh without user interaction
-  - Leverages Azure Identity's internal token cache and refresh mechanism
-  - Falls back to interactive authentication if silent refresh fails
+- **No Manual Token Management**: Eliminates custom token caching, refresh services, and background threads
 - **Scope Management**: Requests specific delegated permissions rather than broad access
 - **Browser-based Auth**: Opens browser for user sign-in, no device codes required
 - **Backward Compatibility**: Provides module-level functions for existing code
 
 **Key Features:**
-- Object-oriented design with encapsulated state
-- Configurable token cache file location and refresh intervals
-- Automatic token refresh with background service
-- 5-minute expiration buffer for token validity
-- Cache validation and cleanup
+- Simplified object-oriented design with minimal state management
+- Azure SDK handles all token refresh automatically
+- AuthenticationRecord enables silent authentication across application restarts
+- No background threads or manual refresh services needed
+- Platform-specific secure token storage (Windows Data Protection API, macOS Keychain, etc.)
 - Support for multiple tenants (common, consumers, organization-specific)
-- Daemon thread management with proper cleanup
-- No global variables - all state is instance-based
+- Robust error handling with automatic fallback to interactive authentication
+- Clear separation between first-time authentication and subsequent silent authentication
 
 **Architecture Changes:**
-- Refactored from global functions to `AzureAuthentication` class
-- Removed global variables for better encapsulation
-- Added backward compatibility layer for existing code
-- Each instance manages its own cache file and refresh service
-- Thread safety improvements with instance-based locking
+- **Major Simplification**: Removed all manual token caching, refresh token handling, and background services
+- **AuthenticationRecord**: First authentication saves record to `~/.azure-graph-auth.json` for future silent auth
+- **Azure SDK Delegation**: All token management delegated to Azure Identity library
+- **Removed Complex Features**: No more background refresh threads, manual HTTP token requests, or custom cache validation
+- **Streamlined Interface**: Simple methods: `authenticate()`, `get_token()`, `get_credential()`, `clear_cache()`
+- **Persistent Authentication**: Uses Azure's TokenCachePersistenceOptions for cross-session token persistence
+- **Eliminated Global State**: No global variables, minimal instance state
 
 #### 2. Graph API Client (`graph.py`)
 - **HTTP Client**: Uses `httpx` for robust HTTP communication
@@ -164,26 +160,27 @@ SCOPES = [
 
 ## Key Design Decisions
 
-### 1. Object-Oriented Authentication Refactoring
-- **Chosen**: `AzureAuthentication` class with instance-based state
-- **Rationale**: Better encapsulation, no global variables, thread safety, testability
+### 1. Simplified Authentication Architecture
+- **Chosen**: Azure SDK-managed authentication with AuthenticationRecord
+- **Rationale**: Eliminates complex manual token management, leverages tested Azure SDK functionality
 - **Benefits**: 
-  - Multiple instances with different configurations
-  - Cleaner state management
-  - Easier testing and mocking
-  - Better separation of concerns
+  - Reduced code complexity and maintenance burden
+  - More reliable token refresh handled by Microsoft's own library
+  - Platform-specific secure storage automatically handled
+  - Better security through established patterns
 - **Backward Compatibility**: Module-level functions maintained for existing code
-- **Migration Path**: Existing code continues to work while allowing gradual migration
+- **Migration Path**: Existing code continues to work with simplified backend
 
 ### 2. Delegated vs Application Access
 - **Chosen**: Delegated access
 - **Rationale**: User-scoped permissions, better security model, no admin consent required
 - **Trade-off**: Requires user authentication vs automatic background access
 
-### 3. Token Caching Strategy
-- **Two-level caching**: Azure Identity + application cache
-- **Benefits**: Reduced authentication prompts, improved performance
-- **Implementation**: File-based cache with expiration validation
+### 3. Authentication Storage Strategy
+- **AuthenticationRecord**: Stores authentication metadata (not tokens) in `~/.azure-graph-auth.json`
+- **Platform-Specific Token Cache**: Azure SDK manages secure token storage per platform
+- **Benefits**: Seamless authentication across restarts, improved security, reduced complexity
+- **Implementation**: File-based AuthenticationRecord with Azure SDK's secure token cache
 
 ### 4. Error Handling Philosophy
 - **Fail Fast**: Validate inputs early, provide clear error messages
@@ -198,9 +195,10 @@ SCOPES = [
 ## Security Considerations
 
 ### 1. Token Security
-- Local file-based cache (`~/.microsoft_mcp_delegated_token_cache.json`)
-- Tokens have expiration times
-- Cache can be cleared manually
+- AuthenticationRecord file (`~/.azure-graph-auth.json`) contains no sensitive data
+- Tokens managed by Azure SDK using platform-specific secure storage
+- Tokens have expiration times managed automatically
+- Cache can be cleared manually via `clear_cache()` method
 - No tokens in environment variables or code
 
 ### 2. Permission Model
@@ -248,8 +246,8 @@ authenticate.py          # Standalone authentication script
 ## Performance Characteristics
 
 ### Typical Response Times
-- **Token acquisition**: 100-500ms (cached) / 2-5s (fresh auth)
-- **Background token refresh**: 200-800ms (silent refresh)
+- **Token acquisition**: 50-200ms (cached) / 2-5s (interactive auth)
+- **Silent authentication**: 100-300ms (using AuthenticationRecord)
 - **Simple API calls**: 200-800ms
 - **Paginated requests**: 500ms-2s per page
 - **File uploads**: Depends on size, ~1MB/s
@@ -263,9 +261,9 @@ authenticate.py          # Standalone authentication script
 ### Memory Usage
 - Minimal memory footprint
 - Streaming for large files
-- No persistent caching in memory
+- No background threads or refresh services
 - HTTP connection pooling via httpx
-- Background refresh thread uses minimal resources
+- Azure SDK handles token management efficiently
 
 ## Future Considerations
 
@@ -278,9 +276,9 @@ authenticate.py          # Standalone authentication script
 
 ### Scalability Considerations
 - **Connection pooling**: Already implemented via httpx
-- **Token management**: Background refresh service prevents authentication interruptions
+- **Token management**: Azure SDK handles automatic refresh without interruptions
 - **Caching strategies**: Response caching for frequently accessed data
 - **Resource management**: Connection limits, timeout configuration
-- **Thread safety**: Background refresh uses proper locking mechanisms
+- **Thread safety**: Azure SDK provides thread-safe token management
 
 This implementation provides a robust, secure, and comprehensive interface to Microsoft 365 services while maintaining simplicity and reliability for AI assistant integration.

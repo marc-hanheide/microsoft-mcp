@@ -6,20 +6,20 @@ Run this script to sign in to your Microsoft account using delegated access.
 
 import os
 import sys
-import asyncio
 from pathlib import Path
 
 # Add src to path so we can import our modules
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from dotenv import load_dotenv
-from microsoft_mcp import auth
+from microsoft_mcp.auth import AzureAuthentication, get_auth_instance
+from microsoft_mcp import graph
 
 # Load environment variables before anything else
 load_dotenv()
 
 
-async def main():
+def main():
     if not os.getenv("MICROSOFT_MCP_CLIENT_ID"):
         print("Error: MICROSOFT_MCP_CLIENT_ID environment variable is required")
         print("\nPlease set it in your .env file or environment:")
@@ -47,24 +47,56 @@ async def main():
         print("Using default localhost redirect URI")
     print()
 
+    # Get auth instance
+    auth = get_auth_instance()
+
     # Check if already authenticated
     try:
         print("Checking current authentication status...")
-        user_info = await auth.get_user_info()
-        print(f"✓ Already authenticated as: {user_info['displayName']}")
-        print(f"  Email: {user_info.get('mail') or user_info.get('userPrincipalName')}")
-        print(f"  User ID: {user_info['id']}")
-        
-        choice = input("\nDo you want to re-authenticate? (y/n): ").lower()
-        if choice != "y":
-            print("Using existing authentication.")
-            return
+
+        # Check if we have an AuthenticationRecord and can get a token
+        if auth.exists_valid_token():
+            # Try to get user info to verify authentication works
+            user_info = graph.request(
+                "GET",
+                "/me",
+                params={"$select": "id,displayName,mail,userPrincipalName"},
+            )
+
+            print(f"✓ Already authenticated as: {user_info['displayName']}")
+            print(
+                f"  Email: {user_info.get('mail') or user_info.get('userPrincipalName')}"
+            )
+            print(f"  User ID: {user_info['id']}")
+
+            # Display current token information
+            try:
+                import datetime
+
+                token, expires_on = auth.get_token_with_details()
+                expires_dt = datetime.datetime.fromtimestamp(expires_on)
+
+                print(f"\n📋 Current Token Information:")
+                print(f"   Token (first 20 chars): {token[:20]}...")
+                print(f"   Expires on: {expires_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"   Expires in: {expires_dt - datetime.datetime.now()}")
+            except Exception as e:
+                print(f"   ⚠ Could not retrieve token details: {e}")
+
+            choice = input("\nDo you want to re-authenticate? (y/n): ").lower()
+            if choice != "y":
+                print("Using existing authentication.")
+                return
+            else:
+                # Clear existing cache to force re-authentication
+                auth.clear_cache()
+                print("Authentication cache cleared. Proceeding with authentication...")
         else:
-            # Clear existing cache to force re-authentication
-            auth.clear_token_cache()
-            print("Token cache cleared. Proceeding with authentication...")
-    except Exception:
-        print("No valid authentication found. Proceeding with authentication...")
+            print("No valid authentication found. Proceeding with authentication...")
+
+    except Exception as e:
+        print(f"Authentication check failed: {e}")
+        print("Proceeding with authentication...")
 
     print()
 
@@ -72,18 +104,40 @@ async def main():
         print("Starting authentication process...")
         print("This will open a browser window for Microsoft sign-in.")
         print("\nRequested permissions:")
-        for scope in auth.SCOPES:
+        from microsoft_mcp.auth import SCOPES
+
+        for scope in SCOPES:
             print(f"   - {scope}")
         print("\nStarting authentication...")
 
-        # Trigger authentication by trying to get user info
-        user_info = await auth.get_user_info()
+        # Perform interactive authentication
+        auth_record = auth.authenticate()
+        print(f"\n✓ Authentication successful!")
+        print(f"AuthenticationRecord saved to: {auth.auth_record_file}")
 
-        print("\n✓ Authentication successful!")
+        # Verify authentication by getting user info
+        user_info = graph.request(
+            "GET", "/me", params={"$select": "id,displayName,mail,userPrincipalName"}
+        )
+
         print(f"Signed in as: {user_info['displayName']}")
         print(f"Email: {user_info.get('mail') or user_info.get('userPrincipalName')}")
         print(f"User ID: {user_info['id']}")
         print("✓ Delegated access verified")
+
+        # Get and display token information
+        try:
+            import datetime
+
+            token, expires_on = auth.get_token_with_details()
+            expires_dt = datetime.datetime.fromtimestamp(expires_on)
+
+            print(f"\n📋 Token Information:")
+            print(f"   Token (first 20 chars): {token[:20]}...")
+            print(f"   Expires on: {expires_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   Expires in: {expires_dt - datetime.datetime.now()}")
+        except Exception as e:
+            print(f"⚠ Could not retrieve token details: {e}")
 
     except Exception as e:
         print(f"\n✗ Authentication failed: {e}")
@@ -93,6 +147,7 @@ async def main():
     print("The authenticated account has consented to the following permissions:")
     print("• User.Read - Read user profile")
     print("• User.ReadBasic.All - Read basic info of all users")
+    print("• Chat.Read - Read chat messages")
     print("• Mail.Read - Read emails")
     print("• Team.ReadBasic.All - Read basic team information")
     print("• TeamMember.ReadWrite.All - Read and write team membership")
@@ -100,8 +155,11 @@ async def main():
     print("• Files.Read - Access OneDrive files")
 
     print("\n✓ Delegated Access Authentication complete!")
-    print("You can now use the Microsoft MCP tools without specifying account_id.")
+    print("You can now use the Microsoft MCP tools.")
+    print(
+        "Future runs will authenticate silently using the saved AuthenticationRecord."
+    )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
