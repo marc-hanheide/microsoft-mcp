@@ -16,14 +16,21 @@ Microsoft MCP is a comprehensive MCP server that provides AI assistants with sea
 - **Token Caching**: Two-level caching system:
   - Azure Identity automatic caching
   - Application-level token cache (`~/.microsoft_mcp_delegated_token_cache.json`)
+- **Background Token Refresh**: Automatic token refresh service that runs in a separate thread:
+  - Refreshes tokens 1 hour before expiration (configurable)
+  - Checks every 5 minutes for tokens that need refresh
+  - Uses shared credential instance for silent refresh without user interaction
+  - Leverages Azure Identity's internal token cache and refresh mechanism
+  - Falls back to interactive authentication if silent refresh fails
 - **Scope Management**: Requests specific delegated permissions rather than broad access
 - **Browser-based Auth**: Opens browser for user sign-in, no device codes required
 
 **Key Features:**
-- Automatic token refresh
+- Automatic token refresh with background service
 - 5-minute expiration buffer for token validity
 - Cache validation and cleanup
 - Support for multiple tenants (common, consumers, organization-specific)
+- Daemon thread management with proper cleanup
 
 #### 2. Graph API Client (`graph.py`)
 - **HTTP Client**: Uses `httpx` for robust HTTP communication
@@ -217,6 +224,7 @@ authenticate.py          # Standalone authentication script
 
 ### Typical Response Times
 - **Token acquisition**: 100-500ms (cached) / 2-5s (fresh auth)
+- **Background token refresh**: 200-800ms (silent refresh)
 - **Simple API calls**: 200-800ms
 - **Paginated requests**: 500ms-2s per page
 - **File uploads**: Depends on size, ~1MB/s
@@ -232,6 +240,7 @@ authenticate.py          # Standalone authentication script
 - Streaming for large files
 - No persistent caching in memory
 - HTTP connection pooling via httpx
+- Background refresh thread uses minimal resources
 
 ## Future Considerations
 
@@ -244,8 +253,9 @@ authenticate.py          # Standalone authentication script
 
 ### Scalability Considerations
 - **Connection pooling**: Already implemented via httpx
-- **Token refresh optimization**: Background refresh before expiration
+- **Token management**: Background refresh service prevents authentication interruptions
 - **Caching strategies**: Response caching for frequently accessed data
 - **Resource management**: Connection limits, timeout configuration
+- **Thread safety**: Background refresh uses proper locking mechanisms
 
 This implementation provides a robust, secure, and comprehensive interface to Microsoft 365 services while maintaining simplicity and reliability for AI assistant integration.

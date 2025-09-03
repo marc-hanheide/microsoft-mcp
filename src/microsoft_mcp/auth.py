@@ -11,6 +11,7 @@ Key Features:
 - Requests specific delegated permissions (scopes) rather than broad access
 - Supports token caching automatically through azure.identity
 - Additional token caching at application level for improved performance
+- Background token refresh service to prevent token expiration
 - Works seamlessly with msgraph.GraphServiceClient
 
 Authentication Flow:
@@ -26,6 +27,15 @@ Token Caching:
 - Additional API verification ensures tokens are actually valid
 - Invalid/expired tokens trigger automatic re-authentication
 - Cache can be cleared manually using clear_token_cache()
+
+Background Token Refresh:
+- Automatic background refresh service starts when tokens are first obtained
+- Refreshes tokens 1 hour before expiration (configurable via REFRESH_BUFFER_SECONDS)
+- Checks for refresh needs every 5 minutes (configurable via REFRESH_CHECK_INTERVAL)
+- Uses shared credential instance for silent refresh without user interaction
+- Leverages Azure Identity's internal token cache and refresh token mechanism
+- Falls back to interactive authentication if silent refresh fails
+- Service runs as daemon thread and stops automatically on program exit
 
 Delegated Permissions Used:
 - User.Read: Read the signed-in user's profile
@@ -51,10 +61,12 @@ import asyncio
 import json
 import time
 import logging
+import threading
+import atexit
 from pathlib import Path
 from typing import NamedTuple, Optional
 from dotenv import load_dotenv
-from azure.identity import InteractiveBrowserCredential
+from azure.identity import InteractiveBrowserCredential, SharedTokenCacheCredential, TokenCachePersistenceOptions
 from azure.core.credentials import AccessToken
 from msgraph import GraphServiceClient
 
@@ -66,6 +78,15 @@ load_dotenv()
 
 # Token cache file location
 TOKEN_CACHE_FILE = Path.home() / ".microsoft_mcp_delegated_token_cache.json"
+
+# Token refresh configuration
+REFRESH_BUFFER_SECONDS = 3600  # Refresh 1 hour before expiration
+REFRESH_CHECK_INTERVAL = 300  # Check every 5 minutes
+_refresh_thread = None
+_refresh_thread_stop = False
+
+# Shared credential instance for silent refresh
+_credential_instance = None
 
 # Delegated permissions (scopes) for accessing user data on behalf of the signed-in user
 # These match the scopes used in your working example.py
@@ -84,19 +105,16 @@ SCOPES = [
 ]
 
 # Scopes useful for full search:
-    # Chat.Read
-    # ChannelMessage.Read.All
-    # Mail.Read
-    # Calendars.Read
-    # Files.Read.All
-    # Sites.Read.All
-    # User.Read
-    # User.ReadBasic.All
-    # Team.ReadBasic.All
-    # TeamMember.ReadWrite.All
-
-
-
+# Chat.Read
+# ChannelMessage.Read.All
+# Mail.Read
+# Calendars.Read
+# Files.Read.All
+# Sites.Read.All
+# User.Read
+# User.ReadBasic.All
+# Team.ReadBasic.All
+# TeamMember.ReadWrite.All
 
 
 class CachedToken(NamedTuple):
@@ -149,11 +167,133 @@ def _is_token_valid(cached_token: CachedToken) -> bool:
     return is_valid
 
 
+def _needs_refresh(cached_token: CachedToken) -> bool:
+    """Check if cached token needs refresh (within refresh buffer time)"""
+    current_time = time.time()
+    needs_refresh = cached_token.expires_on <= (current_time + REFRESH_BUFFER_SECONDS)
+    if needs_refresh:
+        logger.info(
+            f"Token needs refresh: expires at {time.ctime(cached_token.expires_on)}, "
+            f"refresh buffer is {REFRESH_BUFFER_SECONDS} seconds"
+        )
+    return needs_refresh
+
+
+def _refresh_token_silently() -> bool:
+    """
+    Attempt to refresh the token silently using the cached credential.
+    Returns True if successful, False otherwise.
+    """
+    global _credential_instance
+
+    try:
+        logger.info("Attempting silent token refresh")
+
+        # Use the existing credential instance if available
+        if _credential_instance is None:
+            logger.warning("No credential instance available for silent refresh")
+            return False
+
+        # Try to get a new token using cached authentication
+        # This should use the credential's internal cache and refresh token
+        token: AccessToken = _credential_instance.get_token(*SCOPES)
+
+        logger.info("Silent token refresh successful")
+        _write_token_cache(token.token, token.expires_on)
+        return True
+
+    except Exception as e:
+        logger.warning(f"Silent token refresh failed: {e}")
+        return False
+
+
+def _token_refresh_worker():
+    """Background worker thread that checks and refreshes tokens"""
+    global _refresh_thread_stop
+
+    logger.info("Token refresh worker thread started")
+
+    while not _refresh_thread_stop:
+        try:
+            # Check if we have a cached token that needs refresh
+            cached_token = _read_token_cache()
+            if cached_token and _needs_refresh(cached_token):
+                logger.info("Token refresh needed, attempting silent refresh")
+
+                if _refresh_token_silently():
+                    logger.info("Token refreshed successfully in background")
+                else:
+                    logger.warning(
+                        "Background token refresh failed - will require interactive authentication on next use"
+                    )
+
+            # Sleep for the check interval or until stop is requested
+            for _ in range(REFRESH_CHECK_INTERVAL):
+                if _refresh_thread_stop:
+                    break
+                time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error in token refresh worker: {e}")
+            # Continue running even if there's an error
+            time.sleep(REFRESH_CHECK_INTERVAL)
+
+    logger.info("Token refresh worker thread stopped")
+
+
+def start_token_refresh_service():
+    """Start the background token refresh service"""
+    global _refresh_thread, _refresh_thread_stop
+
+    if _refresh_thread is not None and _refresh_thread.is_alive():
+        logger.info("Token refresh service is already running")
+        return
+
+    logger.info("Starting token refresh service")
+    _refresh_thread_stop = False
+    _refresh_thread = threading.Thread(target=_token_refresh_worker, daemon=True)
+    _refresh_thread.start()
+
+    # Register cleanup function to stop the thread on exit
+    atexit.register(stop_token_refresh_service)
+
+
+def stop_token_refresh_service():
+    """Stop the background token refresh service"""
+    global _refresh_thread, _refresh_thread_stop
+
+    if _refresh_thread is None or not _refresh_thread.is_alive():
+        return
+
+    logger.info("Stopping token refresh service")
+    _refresh_thread_stop = True
+
+    # Wait for thread to finish (with timeout)
+    if _refresh_thread.is_alive():
+        _refresh_thread.join(timeout=5)
+        if _refresh_thread.is_alive():
+            logger.warning("Token refresh thread did not stop within timeout")
+
+
+def is_token_refresh_service_running() -> bool:
+    """Check if the token refresh service is currently running"""
+    global _refresh_thread
+    return _refresh_thread is not None and _refresh_thread.is_alive()
+
+
 def get_credential() -> InteractiveBrowserCredential:
     """
     Create and configure InteractiveBrowserCredential for delegated access.
     This credential handles the interactive authentication flow automatically.
+    Returns a shared instance for token refresh purposes.
     """
+    global _credential_instance
+
+    # Return existing instance if available
+    if _credential_instance is not None:
+        logger.info("Returning existing credential instance")
+        return _credential_instance
+
     logger.info("Creating InteractiveBrowserCredential for delegated access")
 
     client_id = os.getenv("MICROSOFT_MCP_CLIENT_ID")
@@ -171,19 +311,22 @@ def get_credential() -> InteractiveBrowserCredential:
         logger.info("Using default localhost redirect URI")
 
     # Configure credential with optional redirect URI
+
+    token_cache = TokenCachePersistenceOptions(allow_unencrypted_storage=True, name="microsoft_mcp_delegated_token_cache")
     credential_kwargs = {
         "client_id": client_id,
         "tenant_id": tenant_id,
+        "cache_persistence_options": token_cache
     }
 
     # Add redirect_uri if specified (for non-localhost deployments)
     if redirect_uri:
         credential_kwargs["redirect_uri"] = redirect_uri
 
-    credential = InteractiveBrowserCredential(**credential_kwargs)
+    _credential_instance = InteractiveBrowserCredential(**credential_kwargs)
     logger.info("InteractiveBrowserCredential created successfully")
 
-    return credential
+    return _credential_instance
 
 
 def get_graph_client(scopes: Optional[list[str]] = None) -> GraphServiceClient:
@@ -225,6 +368,11 @@ def get_token() -> str:
     cached_token = _read_token_cache()
     if cached_token and _is_token_valid(cached_token):
         logger.info("Found valid cached token, using cached token")
+
+        # Start refresh service if not already running
+        if not is_token_refresh_service_running():
+            start_token_refresh_service()
+
         return cached_token.token
 
     # No valid cached token, get a new one
@@ -240,25 +388,42 @@ def get_token() -> str:
         # Cache the new token
         _write_token_cache(token.token, token.expires_on)
 
+        # Start refresh service if not already running
+        if not is_token_refresh_service_running():
+            start_token_refresh_service()
+
         return token.token
     except Exception as e:
         logger.error(f"Failed to acquire access token: {e}")
-        # If token acquisition fails, try to clear cache and raise the error
+        # If token acquisition fails, try to clear cache and credential instance
         if TOKEN_CACHE_FILE.exists():
             logger.info("Clearing token cache due to authentication failure")
             TOKEN_CACHE_FILE.unlink()
+        clear_credential_cache()
         raise Exception(f"Failed to acquire access token: {str(e)}")
 
 
 def clear_token_cache() -> None:
     """Clear the cached token to force re-authentication"""
+    global _credential_instance
+
     try:
         if TOKEN_CACHE_FILE.exists():
             TOKEN_CACHE_FILE.unlink()
             logger.info("Token cache cleared successfully")
         else:
             logger.info("No token cache file to clear")
+
+        # Also clear the credential instance to force new authentication
+        _credential_instance = None
+        logger.info("Credential instance cleared")
+
     except Exception as e:
         logger.warning(f"Failed to clear token cache: {e}")
 
 
+def clear_credential_cache() -> None:
+    """Clear the credential instance to force re-authentication"""
+    global _credential_instance
+    _credential_instance = None
+    logger.info("Credential instance cleared")
