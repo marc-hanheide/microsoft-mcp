@@ -386,7 +386,35 @@ def search_query(
             # Update from parameter for next batch
             payload["requests"][0]["from"] += payload["requests"][0]["size"]
 
+        except httpx.HTTPStatusError as e:
+            # Handle specific HTTP status codes
+            status_code = e.response.status_code
+            if status_code == 400:
+                raise ValueError(
+                    f"Bad request - invalid search query or parameters: {e}"
+                )
+            elif status_code == 401:
+                raise PermissionError(f"Unauthorized - authentication failed: {e}")
+            elif status_code == 403:
+                raise PermissionError(
+                    f"Forbidden - insufficient permissions for search: {e}"
+                )
+            elif status_code == 404:
+                raise ValueError(f"Search endpoint not found: {e}")
+            elif status_code == 429:
+                # Rate limiting - this should be handled by the request function already
+                raise RuntimeError(f"Rate limited - too many search requests: {e}")
+            elif status_code >= 500:
+                raise RuntimeError(
+                    f"Server error during search (status {status_code}): {e}"
+                )
+            else:
+                raise RuntimeError(
+                    f"HTTP error during search (status {status_code}): {e}"
+                )
+        except httpx.RequestError as e:
+            # Handle network/connection errors
+            raise ConnectionError(f"Network error during search query: {e}")
         except Exception as e:
-            # Log the error and break to avoid infinite loops
-            print(f"Search query error: {e}")
-            break
+            # Handle other unexpected errors
+            raise RuntimeError(f"Unexpected error during search query: {e}")
