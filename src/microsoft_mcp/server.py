@@ -2,7 +2,7 @@ import os
 import sys
 import asyncio
 from .tools import mcp
-from . import auth
+from .auth import AzureAuthentication
 
 
 def main() -> None:
@@ -13,13 +13,17 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # Option 1: Using the new class-based approach directly
+    # auth_instance = AzureAuthentication()
+
+    # Option 2: Using backward-compatibility functions (current approach)
     # # Initiate authentication flow at startup
     # try:
     #     print("Initializing Microsoft Graph authentication...", file=sys.stderr)
 
     #     # Try to get a token to trigger authentication if needed
     #     # This will use cached token if available, or prompt for authentication
-    #     token = auth.get_token()
+    #     token = auth_instance.get_token()  # or auth.get_token() for backward compatibility
 
     #     print("✓ Authentication successful - MCP server starting...", file=sys.stderr)
 

@@ -11,6 +11,7 @@ Microsoft MCP is a comprehensive MCP server that provides AI assistants with sea
 ### Core Components
 
 #### 1. Authentication System (`auth.py`)
+- **Object-Oriented Design**: `AzureAuthentication` class encapsulates all authentication functionality
 - **Delegated Access**: Uses Azure Identity's `InteractiveBrowserCredential` for user authentication
 - **Modern Authentication Flow**: Implements authorization code flow with PKCE (Proof Key for Code Exchange)
 - **Token Caching**: Two-level caching system:
@@ -24,13 +25,24 @@ Microsoft MCP is a comprehensive MCP server that provides AI assistants with sea
   - Falls back to interactive authentication if silent refresh fails
 - **Scope Management**: Requests specific delegated permissions rather than broad access
 - **Browser-based Auth**: Opens browser for user sign-in, no device codes required
+- **Backward Compatibility**: Provides module-level functions for existing code
 
 **Key Features:**
+- Object-oriented design with encapsulated state
+- Configurable token cache file location and refresh intervals
 - Automatic token refresh with background service
 - 5-minute expiration buffer for token validity
 - Cache validation and cleanup
 - Support for multiple tenants (common, consumers, organization-specific)
 - Daemon thread management with proper cleanup
+- No global variables - all state is instance-based
+
+**Architecture Changes:**
+- Refactored from global functions to `AzureAuthentication` class
+- Removed global variables for better encapsulation
+- Added backward compatibility layer for existing code
+- Each instance manages its own cache file and refresh service
+- Thread safety improvements with instance-based locking
 
 #### 2. Graph API Client (`graph.py`)
 - **HTTP Client**: Uses `httpx` for robust HTTP communication
@@ -47,13 +59,15 @@ Microsoft MCP is a comprehensive MCP server that provides AI assistants with sea
 
 #### 3. MCP Tools (`tools.py`)
 - **FastMCP Framework**: Uses FastMCP for tool registration and management
+- **Authentication Integration**: Uses `AzureAuthentication` class instance for authentication
 - **Comprehensive Coverage**: 20+ tools covering email, calendar, contacts, and files
 - **Error Handling**: Consistent error logging and exception propagation
 - **Response Optimization**: Configurable body truncation, attachment handling
 
 #### 4. Server Implementation (`server.py`)
 - **Environment Validation**: Checks for required `MICROSOFT_MCP_CLIENT_ID`
-- **Startup Authentication**: Validates authentication before starting MCP server
+- **Authentication Options**: Supports both class-based and function-based authentication approaches
+- **Startup Authentication**: Optional validation of authentication before starting MCP server
 - **Error Recovery**: Graceful failure with helpful error messages
 
 ## Implementation Patterns
@@ -150,22 +164,33 @@ SCOPES = [
 
 ## Key Design Decisions
 
-### 1. Delegated vs Application Access
+### 1. Object-Oriented Authentication Refactoring
+- **Chosen**: `AzureAuthentication` class with instance-based state
+- **Rationale**: Better encapsulation, no global variables, thread safety, testability
+- **Benefits**: 
+  - Multiple instances with different configurations
+  - Cleaner state management
+  - Easier testing and mocking
+  - Better separation of concerns
+- **Backward Compatibility**: Module-level functions maintained for existing code
+- **Migration Path**: Existing code continues to work while allowing gradual migration
+
+### 2. Delegated vs Application Access
 - **Chosen**: Delegated access
 - **Rationale**: User-scoped permissions, better security model, no admin consent required
 - **Trade-off**: Requires user authentication vs automatic background access
 
-### 2. Token Caching Strategy
+### 3. Token Caching Strategy
 - **Two-level caching**: Azure Identity + application cache
 - **Benefits**: Reduced authentication prompts, improved performance
 - **Implementation**: File-based cache with expiration validation
 
-### 3. Error Handling Philosophy
+### 4. Error Handling Philosophy
 - **Fail Fast**: Validate inputs early, provide clear error messages
 - **Logging**: Comprehensive logging for debugging
 - **User Experience**: Helpful error messages, recovery suggestions
 
-### 4. Response Size Management
+### 5. Response Size Management
 - **Body Truncation**: Configurable limits for email body content
 - **Attachment Handling**: Metadata only unless explicitly requested
 - **Pagination**: Limit-based result sets to manage response sizes
