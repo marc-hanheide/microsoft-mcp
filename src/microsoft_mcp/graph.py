@@ -1,13 +1,30 @@
 import httpx
 import time
-from typing import Any, Iterator
-from .auth import get_token
+from typing import Any, Iterator, Optional
+from .auth import AzureAuthentication
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
 # 15 x 320 KiB = 4,915,200 bytes
 UPLOAD_CHUNK_SIZE = 15 * 320 * 1024
 
 _client = httpx.Client(timeout=30.0, follow_redirects=True)
+
+# Global auth instance
+_global_auth: Optional[AzureAuthentication] = None
+
+
+def set_auth_instance(auth: AzureAuthentication) -> None:
+    """Set the global authentication instance for the graph module"""
+    global _global_auth
+    _global_auth = auth
+
+
+def get_auth_instance() -> AzureAuthentication:
+    """Get the global authentication instance, creating one if needed"""
+    global _global_auth
+    if _global_auth is None:
+        _global_auth = AzureAuthentication()
+    return _global_auth
 
 
 def request(
@@ -17,9 +34,11 @@ def request(
     json: dict[str, Any] | None = None,
     data: bytes | None = None,
     max_retries: int = 3,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any] | None:
+    auth_instance = auth or get_auth_instance()
     headers = {
-        "Authorization": f"Bearer {get_token()}",
+        "Authorization": f"Bearer {auth_instance.get_token()}",
     }
 
     if method == "GET":
@@ -86,6 +105,7 @@ def request_paginated(
     path: str,
     params: dict[str, Any] | None = None,
     limit: int | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> Iterator[dict[str, Any]]:
     """Make paginated requests following @odata.nextLink"""
     items_returned = 0
@@ -93,9 +113,9 @@ def request_paginated(
 
     while True:
         if next_link:
-            result = request("GET", next_link.replace(BASE_URL, ""))
+            result = request("GET", next_link.replace(BASE_URL, ""), auth=auth)
         else:
-            result = request("GET", path, params=params)
+            result = request("GET", path, params=params, auth=auth)
 
         if not result:
             break
@@ -112,8 +132,11 @@ def request_paginated(
             break
 
 
-def download_raw(path: str, max_retries: int = 3) -> bytes:
-    headers = {"Authorization": f"Bearer {get_token()}"}
+def download_raw(
+    path: str, max_retries: int = 3, auth: Optional[AzureAuthentication] = None
+) -> bytes:
+    auth_instance = auth or get_auth_instance()
+    headers = {"Authorization": f"Bearer {auth_instance.get_token()}"}
 
     retry_count = 0
     while retry_count <= max_retries:
@@ -197,10 +220,11 @@ def _do_chunked_upload(
 def create_upload_session(
     path: str,
     item_properties: dict[str, Any] | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Create an upload session for large files"""
     payload = {"item": item_properties or {}}
-    result = request("POST", f"{path}/createUploadSession", json=payload)
+    result = request("POST", f"{path}/createUploadSession", json=payload, auth=auth)
     if not result:
         raise ValueError("Failed to create upload session")
     return result
@@ -210,32 +234,36 @@ def upload_large_file(
     path: str,
     data: bytes,
     item_properties: dict[str, Any] | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Upload a large file using upload sessions"""
     file_size = len(data)
 
     if file_size <= UPLOAD_CHUNK_SIZE:
-        result = request("PUT", f"{path}/content", data=data)
+        result = request("PUT", f"{path}/content", data=data, auth=auth)
         if not result:
             raise ValueError("Failed to upload file")
         return result
 
-    session = create_upload_session(path, item_properties)
+    session = create_upload_session(path, item_properties, auth=auth)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token()}"}
+    auth_instance = auth or get_auth_instance()
+    headers = {"Authorization": f"Bearer {auth_instance.get_token()}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def create_mail_upload_session(
     message_id: str,
     attachment_item: dict[str, Any],
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Create an upload session for large mail attachments"""
     result = request(
         "POST",
         f"/me/messages/{message_id}/attachments/createUploadSession",
         json={"AttachmentItem": attachment_item},
+        auth=auth,
     )
     if not result:
         raise ValueError("Failed to create mail attachment upload session")
@@ -247,6 +275,7 @@ def upload_large_mail_attachment(
     name: str,
     data: bytes,
     content_type: str = "application/octet-stream",
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Upload a large mail attachment using upload sessions"""
     file_size = len(data)
@@ -258,10 +287,11 @@ def upload_large_mail_attachment(
         "contentType": content_type,
     }
 
-    session = create_mail_upload_session(message_id, attachment_item)
+    session = create_mail_upload_session(message_id, attachment_item, auth=auth)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token()}"}
+    auth_instance = auth or get_auth_instance()
+    headers = {"Authorization": f"Bearer {auth_instance.get_token()}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
@@ -270,6 +300,7 @@ def search_query(
     entity_types: list[str],
     limit: int = 50,
     fields: list[str] | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> Iterator[dict[str, Any]]:
     """Use the modern /search/query API endpoint"""
     # Validate entity types - Microsoft Graph search has specific requirements
@@ -277,13 +308,13 @@ def search_query(
         "message",
         "event",
         "driveItem",
-        #"list",
-        #"listItem",
-        #"site",
+        # "list",
+        # "listItem",
+        # "site",
         "drive",
         "chatMessage",
         "person",
-        #"externalItem",
+        # "externalItem",
     }
 
     # Filter to only valid entity types
@@ -326,7 +357,7 @@ def search_query(
 
     while True:
         try:
-            result = request("POST", "/search/query", json=payload)
+            result = request("POST", "/search/query", json=payload, auth=auth)
 
             if not result or "value" not in result:
                 break

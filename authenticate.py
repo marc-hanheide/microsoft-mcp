@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from dotenv import load_dotenv
-from microsoft_mcp.auth import AzureAuthentication, get_auth_instance
+from microsoft_mcp.auth import AzureAuthentication
 from microsoft_mcp import graph
 
 # Load environment variables before anything else
@@ -48,7 +48,10 @@ def main():
     print()
 
     # Get auth instance
-    auth = get_auth_instance()
+    auth = AzureAuthentication()
+
+    # Set the auth instance for the graph module
+    graph.set_auth_instance(auth)
 
     # Check if already authenticated
     try:

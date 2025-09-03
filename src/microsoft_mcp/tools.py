@@ -16,6 +16,9 @@ mcp = FastMCP("microsoft-graph-mcp")
 # Create a global authentication instance
 auth = AzureAuthentication()
 
+# Set the auth instance for the graph module
+graph.set_auth_instance(auth)
+
 FOLDERS = {
     k.casefold(): v
     for k, v in {
