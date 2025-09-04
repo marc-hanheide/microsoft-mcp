@@ -1,11 +1,30 @@
 import base64
 import datetime as dt
+import logging
 import pathlib as pl
+import subprocess
 from typing import Any
+from unittest import result
+from urllib.parse import quote
 from fastmcp import FastMCP
-from . import graph, auth
+from . import graph
+from .auth import AzureAuthentication
+from markitdown import MarkItDown, StreamInfo
+from io import BytesIO
 
-mcp = FastMCP("microsoft-mcp")
+# Configure logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+mcp = FastMCP("microsoft-graph-mcp")
+
+# Create a global authentication instance
+auth = AzureAuthentication()
+
+# Set the auth instance for the graph module
+graph.set_auth_instance(auth)
+
+markitdown = MarkItDown(enable_builtins=True)
 
 FOLDERS = {
     k.casefold(): v
@@ -20,953 +39,1000 @@ FOLDERS = {
 }
 
 
-@mcp.tool
-def list_accounts() -> list[dict[str, str]]:
-    """List all signed-in Microsoft accounts"""
-    return [
-        {"username": acc.username, "account_id": acc.account_id}
-        for acc in auth.list_accounts()
-    ]
+def convert_to_markdown(html: str, mimetype: str = "text/html") -> str:
+    """Convert HTML content to Markdown format."""
+    # Use MarkItDown to convert HTML to Markdown
+    stream = BytesIO()
+    stream.write(html.encode("utf-8"))
+    stream.seek(0)
+    return markitdown.convert(
+        stream, stream_info=StreamInfo(mimetype=mimetype)
+    ).text_content
 
 
 @mcp.tool
-def authenticate_account() -> dict[str, str]:
-    """Authenticate a new Microsoft account using device flow authentication
+def get_user_details(email: str | None = None) -> dict[str, Any]:
+    """Get details about a user - either the logged-in user or another user by email address.
 
-    Returns authentication instructions and device code for the user to complete authentication.
-    The user must visit the URL and enter the code to authenticate their Microsoft account.
-    """
-    app = auth.get_app()
-    flow = app.initiate_device_flow(scopes=auth.SCOPES)
-
-    if "user_code" not in flow:
-        error_msg = flow.get("error_description", "Unknown error")
-        raise Exception(f"Failed to get device code: {error_msg}")
-
-    verification_url = flow.get(
-        "verification_uri",
-        flow.get("verification_url", "https://microsoft.com/devicelogin"),
-    )
-
-    return {
-        "status": "authentication_required",
-        "instructions": "To authenticate a new Microsoft account:",
-        "step1": f"Visit: {verification_url}",
-        "step2": f"Enter code: {flow['user_code']}",
-        "step3": "Sign in with the Microsoft account you want to add",
-        "step4": "After authenticating, use the 'complete_authentication' tool to finish the process",
-        "device_code": flow["user_code"],
-        "verification_url": verification_url,
-        "expires_in": flow.get("expires_in", 900),
-        "_flow_cache": str(flow),
-    }
-
-
-@mcp.tool
-def complete_authentication(flow_cache: str) -> dict[str, str]:
-    """Complete the authentication process after the user has entered the device code
+    Retrieves user profile information including display name, email, job title, department,
+    office location, and other directory information. When no email is provided, returns
+    details for the currently signed-in user. When an email is provided, looks up that
+    specific user's public profile information.
 
     Args:
-        flow_cache: The flow data returned from authenticate_account (the _flow_cache field)
+        email: Optional email address of the user to look up. If None, returns current user's details.
+               Must be a valid email address format (e.g., "user@company.com").
 
     Returns:
-        Account information if authentication was successful
+        User object containing profile information:
+        - Basic info: id, displayName, mail, userPrincipalName, givenName, surname
+        - Professional: jobTitle, department, companyName, officeLocation, businessPhones
+        - Directory info: accountEnabled, userType, createdDateTime
+        - When looking up other users, some fields may be limited based on directory permissions
+
+    Examples:
+        - get_user_details() - Get current user's profile information
+        - get_user_details("colleague@company.com") - Look up specific user's profile
+        - get_user_details("manager@company.com") - Get manager's contact information
+
+    Note: Looking up other users requires User.ReadBasic.All permission and the target
+    user must be visible in your organization's directory.
     """
-    import ast
+    logger.info(f"get_user_details called: email={email}")
 
     try:
-        flow = ast.literal_eval(flow_cache)
-    except (ValueError, SyntaxError):
-        raise ValueError("Invalid flow cache data")
+        if email is None:
+            # Get current user's details
+            result = graph.request("GET", "/me")
+            logger.info("get_user_details successful: retrieved current user details")
+        else:
+            # Look up user by email address
+            # Use the /users/{email} endpoint to get user by their email/UPN
+            result = graph.request("GET", f"/users/{email}")
+            if not result:
+                logger.error(
+                    f"get_user_details failed: User with email {email} not found"
+                )
+                raise ValueError(f"User with email {email} not found")
+            logger.info(
+                f"get_user_details successful: retrieved details for user {email}"
+            )
 
-    app = auth.get_app()
-    result = app.acquire_token_by_device_flow(flow)
+        return result
+    except Exception as e:
+        logger.error(
+            f"get_user_details failed for email={email}: {str(e)}", exc_info=True
+        )
+        raise
 
-    if "error" in result:
-        error_msg = result.get("error_description", result["error"])
-        if "authorization_pending" in error_msg:
-            return {
-                "status": "pending",
-                "message": "Authentication is still pending. The user needs to complete the authentication process.",
-                "instructions": "Please ensure you've visited the URL and entered the code, then try again.",
-            }
-        raise Exception(f"Authentication failed: {error_msg}")
 
-    # Save the token cache
-    cache = app.token_cache
-    if isinstance(cache, auth.msal.SerializableTokenCache) and cache.has_state_changed:
-        auth._write_cache(cache.serialize())
+@mcp.tool
+def is_logged_in() -> bool:
+    return auth.exists_valid_token()
 
-    # Get the newly added account
-    accounts = app.get_accounts()
-    if accounts:
-        # Find the account that matches the token we just got
-        for account in accounts:
-            if (
-                account.get("username", "").lower()
-                == result.get("id_token_claims", {})
-                .get("preferred_username", "")
-                .lower()
-            ):
-                return {
-                    "status": "success",
-                    "username": account["username"],
-                    "account_id": account["home_account_id"],
-                    "message": f"Successfully authenticated {account['username']}",
-                }
-        # If exact match not found, return the last account
-        account = accounts[-1]
-        return {
-            "status": "success",
-            "username": account["username"],
-            "account_id": account["home_account_id"],
-            "message": f"Successfully authenticated {account['username']}",
-        }
 
-    return {
-        "status": "error",
-        "message": "Authentication succeeded but no account was found",
-    }
+@mcp.tool
+def login() -> str:
+    """Ensure the user is authenticated and return user info.
+    Raises an error if authentication fails.
+
+    `login` is required before any other tools can succeed.
+    """
+
+    if not auth.exists_valid_token():
+        try:
+            auth.get_token()
+            return "logged in"
+        except Exception as e:
+            logger.error(f"login failed: {str(e)}", exc_info=True)
+            raise RuntimeError("Login failed, please check authentication settings.")
+
+    else:
+        return "already logged in"
 
 
 @mcp.tool
 def list_emails(
-    account_id: str,
     folder: str = "inbox",
     limit: int = 10,
+    body_max_length: int = 2000,
     include_body: bool = True,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List emails from specified folder"""
-    folder_path = FOLDERS.get(folder.casefold(), folder)
+    """List emails from a specified folder in the user's mailbox.
 
-    if include_body:
-        select_fields = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead"
-    else:
-        select_fields = "id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId,isRead"
+    Retrieves emails from common folders like inbox, sent, drafts, etc. Results are ordered by
+    received date (most recent first). Use this to get an overview of emails for a specific date range,
+    or find recent messages.
 
-    params = {
-        "$top": min(limit, 100),
-        "$select": select_fields,
-        "$orderby": "receivedDateTime desc",
-    }
+    Args:
+        folder: Folder name to search in. Options: "inbox", "sent", "drafts", "deleted", "junk", "archive"
+        limit: Maximum number of emails to retrieve (1-100, defaults to 10)
+        body_max_length: Maximum characters for email body content (default 2000, will truncate if longer)
+        include_body: Whether to include email body content (affects response size)
+        start_date: Optional start date in ISO format (UTC timezone, e.g., "2024-09-01T00:00:00Z") to filter emails from this date onwards
+        end_date: Optional end date in ISO format (UTC timezone, e.g., "2024-09-30T23:59:59Z") to filter emails up to this date
 
-    emails = list(
-        graph.request_paginated(
-            f"/me/mailFolders/{folder_path}/messages",
-            account_id,
-            params=params,
-            limit=limit,
-        )
+    Returns:
+        List of email objects containing id, subject, sender, recipients, date, attachments info,
+        and optionally body content. Each email has fields like 'id', 'subject', 'from', 'receivedDateTime'.
+        The most recent email (within the specified date range) will be the first included in the results.
+        Contains also a deep link to the conversation as `conversation_url` that can be shown to the user to open the email
+    Examples:
+        - list_emails() - Get 10 most recent inbox emails
+        - list_emails(folder="sent", limit=20) - Get 20 recent sent emails
+        - list_emails(include_body=False) - Get emails without body content for faster response
+        - list_emails(start_date="2024-09-01T00:00:00Z", end_date="2024-09-01T23:59:59Z") - Get emails received on September 1st, 2024
+        - list_emails(start_date="2024-08-01T00:00:00Z") - Get emails from August 1st, 2024 onwards
+        - list_emails(end_date="2024-08-31T23:59:59Z") - Get emails up to August 31st, 2024
+    """
+    logger.info(
+        f"list_emails called: folder={folder}, limit={limit}, include_body={include_body}, start_date={start_date}, end_date={end_date}"
     )
 
-    return emails
+    try:
+        folder_path = FOLDERS.get(folder.casefold(), folder)
+
+        if include_body:
+            select_fields = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead"
+        else:
+            select_fields = "id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId,isRead"
+
+        params = {
+            "$top": min(limit, 100),
+            "$select": select_fields,
+            "$orderby": "receivedDateTime desc",
+        }
+
+        # Add date filtering if provided
+        filter_conditions = []
+        if start_date:
+            filter_conditions.append(f"receivedDateTime ge {start_date}")
+        if end_date:
+            filter_conditions.append(f"receivedDateTime le {end_date}")
+
+        if filter_conditions:
+            params["$filter"] = " and ".join(filter_conditions)
+
+        emails = list(
+            graph.request_paginated(
+                f"/me/mailFolders/{folder_path}/messages",
+                params=params,
+                limit=limit,
+            )
+        )
+
+        for email in emails:
+            if include_body:
+                # truncate the body
+                if "body" in email and "content" in email["body"]:
+                    content = email["body"]["content"]
+                    if len(content) > body_max_length:
+                        email["body"]["content"] = (
+                            content[:body_max_length]
+                            + f"\n\n[Content truncated - {len(content)} total characters]"
+                        )
+                        email["body"]["truncated"] = True
+                        email["body"]["total_length"] = len(content)
+                        logger.info(
+                            f"list_emails: body truncated from {len(content)} to {body_max_length} characters"
+                        )
+            if "conversationId" in email:
+                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+
+
+        logger.info(
+            f"list_emails successful: retrieved {len(emails)} emails from folder {folder}"
+            + (
+                f" with date filter start_date={start_date}, end_date={end_date}"
+                if start_date or end_date
+                else ""
+            )
+        )
+        return emails
+    except Exception as e:
+        logger.error(f"list_emails failed: {str(e)}", exc_info=True)
+        raise
 
 
 @mcp.tool
 def get_email(
     email_id: str,
-    account_id: str,
     include_body: bool = True,
-    body_max_length: int = 50000,
+    body_max_length: int = 5000,
     include_attachments: bool = True,
 ) -> dict[str, Any]:
-    """Get email details with size limits
+    """Get detailed information about a specific email by its ID.
+
+    Retrieves complete email details including headers, body content, and attachment metadata.
+    Body content can be truncated to manage response size. Use this when you need full email details
+    after finding emails with list_emails or search_emails.
 
     Args:
-        email_id: The email ID
-        account_id: The account ID
-        include_body: Whether to include the email body (default: True)
-        body_max_length: Maximum characters for body content (default: 50000)
-        include_attachments: Whether to include attachment metadata (default: True)
+        email_id: Unique identifier of the email (get from list_emails or search results)
+        include_body: Whether to include the email body content in the response
+        body_max_length: Maximum characters for body content (default 50000, will truncate if longer)
+        include_attachments: Whether to include attachment metadata (names, sizes, types)
+
+    Returns:
+        Email object with complete details including:
+        - Basic info: id, subject, from, to, cc, receivedDateTime, isRead
+        - Body: content as text or markdown, contentType, truncation info if applicable
+        - Attachments: list with id, name, size, contentType for each attachment
+        - Conversation: conversationId for threading
+        - a deep link to the conversation as `conversation_url` that can be shown to the user to open the email
+
+    Examples:
+        - get_email("AAMkAD...") - Get full email details
+        - get_email(email_id, include_body=False) - Get headers only without body
+        - get_email(email_id, body_max_length=1000) - Limit body to 1000 characters
     """
-    params = {}
-    if include_attachments:
-        params["$expand"] = "attachments($select=id,name,size,contentType)"
+    logger.info(
+        f"get_email called: email_id={email_id}, include_body={include_body}, body_max_length={body_max_length}, include_attachments={include_attachments}"
+    )
 
-    result = graph.request("GET", f"/me/messages/{email_id}", account_id, params=params)
-    if not result:
-        raise ValueError(f"Email with ID {email_id} not found")
+    try:
+        params = {}
+        if include_attachments:
+            params["$expand"] = "attachments($select=id,name,size,contentType)"
 
-    # Truncate body if needed
-    if include_body and "body" in result and "content" in result["body"]:
-        content = result["body"]["content"]
-        if len(content) > body_max_length:
-            result["body"]["content"] = (
-                content[:body_max_length]
-                + f"\n\n[Content truncated - {len(content)} total characters]"
-            )
-            result["body"]["truncated"] = True
-            result["body"]["total_length"] = len(content)
-    elif not include_body and "body" in result:
-        del result["body"]
-
-    # Remove attachment content bytes to reduce size
-    if "attachments" in result and result["attachments"]:
-        for attachment in result["attachments"]:
-            if "contentBytes" in attachment:
-                del attachment["contentBytes"]
-
-    return result
-
-
-@mcp.tool
-def create_email_draft(
-    account_id: str,
-    to: str | list[str],
-    subject: str,
-    body: str,
-    cc: str | list[str] | None = None,
-    attachments: str | list[str] | None = None,
-) -> dict[str, Any]:
-    """Create an email draft with file path(s) as attachments"""
-    to_list = [to] if isinstance(to, str) else to
-
-    message = {
-        "subject": subject,
-        "body": {"contentType": "Text", "content": body},
-        "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_list],
-    }
-
-    if cc:
-        cc_list = [cc] if isinstance(cc, str) else cc
-        message["ccRecipients"] = [
-            {"emailAddress": {"address": addr}} for addr in cc_list
-        ]
-
-    small_attachments = []
-    large_attachments = []
-
-    if attachments:
-        # Convert single path to list
-        attachment_paths = (
-            [attachments] if isinstance(attachments, str) else attachments
-        )
-        for file_path in attachment_paths:
-            path = pl.Path(file_path).expanduser().resolve()
-            content_bytes = path.read_bytes()
-            att_size = len(content_bytes)
-            att_name = path.name
-
-            if att_size < 3 * 1024 * 1024:
-                small_attachments.append(
-                    {
-                        "@odata.type": "#microsoft.graph.fileAttachment",
-                        "name": att_name,
-                        "contentBytes": base64.b64encode(content_bytes).decode("utf-8"),
-                    }
-                )
-            else:
-                large_attachments.append(
-                    {
-                        "name": att_name,
-                        "content_bytes": content_bytes,
-                        "content_type": "application/octet-stream",
-                    }
-                )
-
-    if small_attachments:
-        message["attachments"] = small_attachments
-
-    result = graph.request("POST", "/me/messages", account_id, json=message)
-    if not result:
-        raise ValueError("Failed to create email draft")
-
-    message_id = result["id"]
-
-    for att in large_attachments:
-        graph.upload_large_mail_attachment(
-            message_id,
-            att["name"],
-            att["content_bytes"],
-            account_id,
-            att.get("content_type", "application/octet-stream"),
-        )
-
-    return result
-
-
-@mcp.tool
-def send_email(
-    account_id: str,
-    to: str | list[str],
-    subject: str,
-    body: str,
-    cc: str | list[str] | None = None,
-    attachments: str | list[str] | None = None,
-) -> dict[str, str]:
-    """Send an email immediately with file path(s) as attachments"""
-    to_list = [to] if isinstance(to, str) else to
-
-    message = {
-        "subject": subject,
-        "body": {"contentType": "Text", "content": body},
-        "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_list],
-    }
-
-    if cc:
-        cc_list = [cc] if isinstance(cc, str) else cc
-        message["ccRecipients"] = [
-            {"emailAddress": {"address": addr}} for addr in cc_list
-        ]
-
-    # Check if we have large attachments
-    has_large_attachments = False
-    processed_attachments = []
-
-    if attachments:
-        # Convert single path to list
-        attachment_paths = (
-            [attachments] if isinstance(attachments, str) else attachments
-        )
-        for file_path in attachment_paths:
-            path = pl.Path(file_path).expanduser().resolve()
-            content_bytes = path.read_bytes()
-            att_size = len(content_bytes)
-            att_name = path.name
-
-            processed_attachments.append(
-                {
-                    "name": att_name,
-                    "content_bytes": content_bytes,
-                    "content_type": "application/octet-stream",
-                    "size": att_size,
-                }
-            )
-
-            if att_size >= 3 * 1024 * 1024:
-                has_large_attachments = True
-
-    if not has_large_attachments and processed_attachments:
-        message["attachments"] = [
-            {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": att["name"],
-                "contentBytes": base64.b64encode(att["content_bytes"]).decode("utf-8"),
-            }
-            for att in processed_attachments
-        ]
-        graph.request("POST", "/me/sendMail", account_id, json={"message": message})
-        return {"status": "sent"}
-    elif has_large_attachments:
-        # Create draft first, then add large attachments, then send
-        # We need to handle large attachments manually here
-        to_list = [to] if isinstance(to, str) else to
-        message = {
-            "subject": subject,
-            "body": {"contentType": "Text", "content": body},
-            "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_list],
-        }
-        if cc:
-            cc_list = [cc] if isinstance(cc, str) else cc
-            message["ccRecipients"] = [
-                {"emailAddress": {"address": addr}} for addr in cc_list
-            ]
-
-        result = graph.request("POST", "/me/messages", account_id, json=message)
+        result = graph.request("GET", f"/me/messages/{email_id}", params=params)
         if not result:
-            raise ValueError("Failed to create email draft")
+            logger.error(f"get_email failed: Email with ID {email_id} not found")
+            raise ValueError(f"Email with ID {email_id} not found")
 
-        message_id = result["id"]
-
-        for att in processed_attachments:
-            if att["size"] >= 3 * 1024 * 1024:
-                graph.upload_large_mail_attachment(
-                    message_id,
-                    att["name"],
-                    att["content_bytes"],
-                    account_id,
-                    att.get("content_type", "application/octet-stream"),
+        # Convert HTML to markdown and truncate body if needed
+        if include_body and "body" in result and "content" in result["body"]:
+            if result["body"]["contentType"].lower() == "html":
+                result["body"]["content"] = convert_to_markdown(
+                    result["body"]["content"]
                 )
-            else:
-                small_att = {
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": att["name"],
-                    "contentBytes": base64.b64encode(att["content_bytes"]).decode(
-                        "utf-8"
-                    ),
-                }
-                graph.request(
-                    "POST",
-                    f"/me/messages/{message_id}/attachments",
-                    account_id,
-                    json=small_att,
+                result["body"]["contentType"] = "text/markdown"
+
+            content = result["body"]["content"]
+            if len(content) > body_max_length:
+                result["body"]["content"] = (
+                    content[:body_max_length]
+                    + f"\n\n[Content truncated - {len(content)} total characters]"
                 )
+                result["body"]["truncated"] = True
+                result["body"]["total_length"] = len(content)
+                logger.info(
+                    f"get_email: body truncated from {len(content)} to {body_max_length} characters"
+                )
+        elif not include_body and "body" in result:
+            del result["body"]
 
-        graph.request("POST", f"/me/messages/{message_id}/send", account_id)
-        return {"status": "sent"}
-    else:
-        graph.request("POST", "/me/sendMail", account_id, json={"message": message})
-        return {"status": "sent"}
+        # tidy up to save tokens
+        for key in [
+            "@odata.context",
+            "@odata.etag",
+            "parentFolderId",
+            "changeKey",
+            "internetMessageId",
+            "isDeliveryReceiptRequested",
+            "isReadReceiptRequested",
+        ]:
+            if key in result:
+                del result[key]
+        # add a link to open the whole conversation as "conversation_url"
+        if "conversationId" in result:
+            result["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(result['conversationId'])}"
 
+        # Remove attachment content bytes to reduce size
+        if "attachments" in result and result["attachments"]:
+            for attachment in result["attachments"]:
+                if "contentBytes" in attachment:
+                    del attachment["contentBytes"]
 
-@mcp.tool
-def update_email(
-    email_id: str, updates: dict[str, Any], account_id: str
-) -> dict[str, Any]:
-    """Update email properties (isRead, categories, flag, etc.)"""
-    result = graph.request(
-        "PATCH", f"/me/messages/{email_id}", account_id, json=updates
-    )
-    if not result:
-        raise ValueError(f"Failed to update email {email_id} - no response")
-    return result
-
-
-@mcp.tool
-def delete_email(email_id: str, account_id: str) -> dict[str, str]:
-    """Delete an email"""
-    graph.request("DELETE", f"/me/messages/{email_id}", account_id)
-    return {"status": "deleted"}
-
-
-@mcp.tool
-def move_email(
-    email_id: str, destination_folder: str, account_id: str
-) -> dict[str, Any]:
-    """Move email to another folder"""
-    folder_path = FOLDERS.get(destination_folder.casefold(), destination_folder)
-
-    folders = graph.request("GET", "/me/mailFolders", account_id)
-    folder_id = None
-
-    if not folders:
-        raise ValueError("Failed to retrieve mail folders")
-    if "value" not in folders:
-        raise ValueError(f"Unexpected folder response structure: {folders}")
-
-    for folder in folders["value"]:
-        if folder["displayName"].lower() == folder_path.lower():
-            folder_id = folder["id"]
-            break
-
-    if not folder_id:
-        raise ValueError(f"Folder '{destination_folder}' not found")
-
-    payload = {"destinationId": folder_id}
-    result = graph.request(
-        "POST", f"/me/messages/{email_id}/move", account_id, json=payload
-    )
-    if not result:
-        raise ValueError("Failed to move email - no response from server")
-    if "id" not in result:
-        raise ValueError(f"Failed to move email - unexpected response: {result}")
-    return {"status": "moved", "new_id": result["id"]}
-
-
-@mcp.tool
-def reply_to_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
-    """Reply to an email (sender only)"""
-    endpoint = f"/me/messages/{email_id}/reply"
-    payload = {"message": {"body": {"contentType": "Text", "content": body}}}
-    graph.request("POST", endpoint, account_id, json=payload)
-    return {"status": "sent"}
-
-
-@mcp.tool
-def reply_all_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
-    """Reply to all recipients of an email"""
-    endpoint = f"/me/messages/{email_id}/replyAll"
-    payload = {"message": {"body": {"contentType": "Text", "content": body}}}
-    graph.request("POST", endpoint, account_id, json=payload)
-    return {"status": "sent"}
+        logger.info(f"get_email successful: retrieved email {email_id}")
+        return result
+    except Exception as e:
+        logger.error(
+            f"get_email failed for email_id={email_id}: {str(e)}", exc_info=True
+        )
+        raise
 
 
 @mcp.tool
 def list_events(
-    account_id: str,
     days_ahead: int = 7,
     days_back: int = 0,
-    include_details: bool = True,
+    max_body_length: int = 500,
+    include_details: bool = False,
 ) -> list[dict[str, Any]]:
-    """List calendar events within specified date range, including recurring event instances"""
-    now = dt.datetime.now(dt.timezone.utc)
-    start = (now - dt.timedelta(days=days_back)).isoformat()
-    end = (now + dt.timedelta(days=days_ahead)).isoformat()
+    """List calendar events within a specified date range.
 
-    params = {
-        "startDateTime": start,
-        "endDateTime": end,
-        "$orderby": "start/dateTime",
-        "$top": 100,
-    }
+    Retrieves calendar events including recurring event instances. Events are ordered by start time.
+    Use this to check upcoming meetings, find events in a date range, or get calendar overview.
 
-    if include_details:
-        params["$select"] = (
-            "id,subject,start,end,location,body,attendees,organizer,isAllDay,recurrence,onlineMeeting,seriesMasterId"
+    Args:
+        days_ahead: Number of days into the future to search (default 7)
+        days_back: Number of days into the past to search (default 0 = today onwards)
+        include_details: Whether to include full event details like body, attendees, online meeting info
+
+    Returns:
+        List of calendar event objects containing:
+        - Basic info: id, subject, start/end times, location, organizer (note: All times are in UTC time zone and may require conversion)
+        - Details (if include_details=True): body, attendees list, recurrence info, online meeting links
+        - Recurring events: individual instances with seriesMasterId for the recurring series
+
+    Examples:
+        - list_events() - Get next 7 days of events
+        - list_events(days_ahead=30) - Get next 30 days of events
+        - list_events(days_back=7, days_ahead=7) - Get events from past week to next week
+        - list_events(include_details=False) - Get basic event info only for faster and shorter response
+    """
+    logger.info(
+        f"list_events called: days_ahead={days_ahead}, days_back={days_back}, include_details={include_details}"
+    )
+
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        start = (now - dt.timedelta(days=days_back)).isoformat()
+        end = (now + dt.timedelta(days=days_ahead)).isoformat()
+
+        params = {
+            "startDateTime": start,
+            "endDateTime": end,
+            "$orderby": "start/dateTime",
+            "$top": 100,
+        }
+
+        if include_details:
+            params["$select"] = (
+                "id,subject,start,end,location,body,attendees,organizer,isAllDay,recurrence,onlineMeeting,seriesMasterId"
+            )
+        else:
+            params["$select"] = "id,subject,start,end,location,organizer,seriesMasterId"
+
+        # Use calendarView to get recurring event instances
+        events = list(graph.request_paginated("/me/calendarView", params=params))
+
+        # truncate the body content if it exceeds max_body_length
+        for event in events:
+            if "body" in event:
+                if "content" in event["body"] and len(event["body"]["content"]) > max_body_length:
+                    event["body"]["content"] = event["body"]["content"][:max_body_length] + "..."
+
+        logger.info(
+            f"list_events successful: retrieved {len(events)} events from {start} to {end}"
         )
-    else:
-        params["$select"] = "id,subject,start,end,location,organizer,seriesMasterId"
-
-    # Use calendarView to get recurring event instances
-    events = list(
-        graph.request_paginated("/me/calendarView", account_id, params=params)
-    )
-
-    return events
+        return events
+    except Exception as e:
+        logger.error(f"list_events failed: {str(e)}", exc_info=True)
+        raise
 
 
 @mcp.tool
-def get_event(event_id: str, account_id: str) -> dict[str, Any]:
-    """Get full event details"""
-    result = graph.request("GET", f"/me/events/{event_id}", account_id)
-    if not result:
-        raise ValueError(f"Event with ID {event_id} not found")
-    return result
+def get_event(event_id: str) -> dict[str, Any]:
+    """Get complete details for a specific calendar event by its ID.
 
+    Retrieves full event information including attendees, recurrence, online meeting details, etc.
+    Use this when you need complete event details after finding events with list_events or search_events.
 
-@mcp.tool
-def create_event(
-    account_id: str,
-    subject: str,
-    start: str,
-    end: str,
-    location: str | None = None,
-    body: str | None = None,
-    attendees: str | list[str] | None = None,
-    timezone: str = "UTC",
-) -> dict[str, Any]:
-    """Create a calendar event"""
-    event = {
-        "subject": subject,
-        "start": {"dateTime": start, "timeZone": timezone},
-        "end": {"dateTime": end, "timeZone": timezone},
-    }
+    Args:
+        event_id: Unique identifier of the calendar event (get from list_events or search results)
 
-    if location:
-        event["location"] = {"displayName": location}
+    Returns:
+        Complete event object containing:
+        - Basic info: id, subject, start/end times, location, isAllDay, organizer
+        - Attendees: list with names, email addresses, response status
+        - Body: event description/notes
+        - Recurrence: pattern info for recurring events
+        - Online meeting: Teams/Zoom links and dial-in info if applicable
+        - Categories: event categorization tags
 
-    if body:
-        event["body"] = {"contentType": "Text", "content": body}
+    Examples:
+        - get_event("AAMkAD...") - Get full details for a specific event
+        - Use after list_events() to get complete info about interesting events
+    """
+    logger.info(f"get_event called: event_id={event_id}")
 
-    if attendees:
-        attendees_list = [attendees] if isinstance(attendees, str) else attendees
-        event["attendees"] = [
-            {"emailAddress": {"address": a}, "type": "required"} for a in attendees_list
-        ]
+    try:
+        result = graph.request("GET", f"/me/events/{event_id}")
+        if not result:
+            logger.error(f"get_event failed: Event with ID {event_id} not found")
+            raise ValueError(f"Event with ID {event_id} not found")
 
-    result = graph.request("POST", "/me/events", account_id, json=event)
-    if not result:
-        raise ValueError("Failed to create event")
-    return result
-
-
-@mcp.tool
-def update_event(
-    event_id: str, updates: dict[str, Any], account_id: str
-) -> dict[str, Any]:
-    """Update event properties"""
-    formatted_updates = {}
-
-    if "subject" in updates:
-        formatted_updates["subject"] = updates["subject"]
-    if "start" in updates:
-        formatted_updates["start"] = {
-            "dateTime": updates["start"],
-            "timeZone": updates.get("timezone", "UTC"),
-        }
-    if "end" in updates:
-        formatted_updates["end"] = {
-            "dateTime": updates["end"],
-            "timeZone": updates.get("timezone", "UTC"),
-        }
-    if "location" in updates:
-        formatted_updates["location"] = {"displayName": updates["location"]}
-    if "body" in updates:
-        formatted_updates["body"] = {"contentType": "Text", "content": updates["body"]}
-
-    result = graph.request(
-        "PATCH", f"/me/events/{event_id}", account_id, json=formatted_updates
-    )
-    return result or {"status": "updated"}
-
-
-@mcp.tool
-def delete_event(
-    account_id: str, event_id: str, send_cancellation: bool = True
-) -> dict[str, str]:
-    """Delete or cancel a calendar event"""
-    if send_cancellation:
-        graph.request("POST", f"/me/events/{event_id}/cancel", account_id, json={})
-    else:
-        graph.request("DELETE", f"/me/events/{event_id}", account_id)
-    return {"status": "deleted"}
-
-
-@mcp.tool
-def respond_event(
-    account_id: str,
-    event_id: str,
-    response: str = "accept",
-    message: str | None = None,
-) -> dict[str, str]:
-    """Respond to event invitation (accept, decline, tentativelyAccept)"""
-    payload: dict[str, Any] = {"sendResponse": True}
-    if message:
-        payload["comment"] = message
-
-    graph.request("POST", f"/me/events/{event_id}/{response}", account_id, json=payload)
-    return {"status": response}
+        logger.info(f"get_event successful: retrieved event {event_id}")
+        return result
+    except Exception as e:
+        logger.error(
+            f"get_event failed for event_id={event_id}: {str(e)}", exc_info=True
+        )
+        raise
 
 
 @mcp.tool
 def check_availability(
-    account_id: str,
     start: str,
     end: str,
     attendees: str | list[str] | None = None,
 ) -> dict[str, Any]:
-    """Check calendar availability for scheduling"""
-    me_info = graph.request("GET", "/me", account_id)
-    if not me_info or "mail" not in me_info:
-        raise ValueError("Failed to get user email address")
-    schedules = [me_info["mail"]]
-    if attendees:
-        attendees_list = [attendees] if isinstance(attendees, str) else attendees
-        schedules.extend(attendees_list)
+    """Check calendar availability for the user and optionally other attendees within a time range.
 
-    payload = {
-        "schedules": schedules,
-        "startTime": {"dateTime": start, "timeZone": "UTC"},
-        "endTime": {"dateTime": end, "timeZone": "UTC"},
-        "availabilityViewInterval": 30,
-    }
+    Determines free/busy status to help schedule meetings. Shows when people are available,
+    busy, or tentatively booked. Useful for finding meeting times that work for everyone.
+    All times are in UTC time zone and may require conversion.
 
-    result = graph.request("POST", "/me/calendar/getSchedule", account_id, json=payload)
-    if not result:
-        raise ValueError("Failed to check availability")
-    return result
+    Args:
+        start: Start time in ISO format (e.g., "2024-09-02T09:00:00Z" or "2024-09-02T09:00:00")
+        end: End time in ISO format
+        attendees: Email address(es) of other people to check (optional). Can be single email or list
 
+    Returns:
+        Availability information containing:
+        - schedules: Array of availability data for each person checked
+        - freeBusyViewType: Type of view (e.g., "freeBusy")
+        - For each person: email, availability intervals showing free/busy/tentative status
+        - availabilityView: Numeric representation of availability (0=free, 1=tentative, 2=busy), 
+          each number represents a 30-minute interval within the specified time range, starting from the start time.
 
-@mcp.tool
-def list_contacts(account_id: str, limit: int = 50) -> list[dict[str, Any]]:
-    """List contacts"""
-    params = {"$top": min(limit, 100)}
-
-    contacts = list(
-        graph.request_paginated("/me/contacts", account_id, params=params, limit=limit)
+    Examples:
+        - check_availability("2024-09-02T14:00:00Z", "2024-09-02T15:00:00Z") - Check your availability
+        - check_availability(start, end, "colleague@company.com") - Check you + one person
+        - check_availability(start, end, ["person1@co.com", "person2@co.com"]) - Check multiple people
+    """
+    logger.info(
+        f"check_availability called: start={start}, end={end}, attendees={attendees}"
     )
-
-    return contacts
-
-
-@mcp.tool
-def get_contact(contact_id: str, account_id: str) -> dict[str, Any]:
-    """Get contact details"""
-    result = graph.request("GET", f"/me/contacts/{contact_id}", account_id)
-    if not result:
-        raise ValueError(f"Contact with ID {contact_id} not found")
-    return result
-
-
-@mcp.tool
-def create_contact(
-    account_id: str,
-    given_name: str,
-    surname: str | None = None,
-    email_addresses: str | list[str] | None = None,
-    phone_numbers: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    """Create a new contact"""
-    contact: dict[str, Any] = {"givenName": given_name}
-
-    if surname:
-        contact["surname"] = surname
-
-    if email_addresses:
-        email_list = (
-            [email_addresses] if isinstance(email_addresses, str) else email_addresses
-        )
-        contact["emailAddresses"] = [
-            {"address": email, "name": f"{given_name} {surname or ''}".strip()}
-            for email in email_list
-        ]
-
-    if phone_numbers:
-        if "business" in phone_numbers:
-            contact["businessPhones"] = [phone_numbers["business"]]
-        if "home" in phone_numbers:
-            contact["homePhones"] = [phone_numbers["home"]]
-        if "mobile" in phone_numbers:
-            contact["mobilePhone"] = phone_numbers["mobile"]
-
-    result = graph.request("POST", "/me/contacts", account_id, json=contact)
-    if not result:
-        raise ValueError("Failed to create contact")
-    return result
-
-
-@mcp.tool
-def update_contact(
-    contact_id: str, updates: dict[str, Any], account_id: str
-) -> dict[str, Any]:
-    """Update contact information"""
-    result = graph.request(
-        "PATCH", f"/me/contacts/{contact_id}", account_id, json=updates
-    )
-    return result or {"status": "updated"}
-
-
-@mcp.tool
-def delete_contact(contact_id: str, account_id: str) -> dict[str, str]:
-    """Delete a contact"""
-    graph.request("DELETE", f"/me/contacts/{contact_id}", account_id)
-    return {"status": "deleted"}
-
-
-@mcp.tool
-def list_files(
-    account_id: str, path: str = "/", limit: int = 50
-) -> list[dict[str, Any]]:
-    """List files and folders in OneDrive"""
-    endpoint = (
-        "/me/drive/root/children"
-        if path == "/"
-        else f"/me/drive/root:/{path}:/children"
-    )
-    params = {
-        "$top": min(limit, 100),
-        "$select": "id,name,size,lastModifiedDateTime,folder,file,@microsoft.graph.downloadUrl",
-    }
-
-    items = list(
-        graph.request_paginated(endpoint, account_id, params=params, limit=limit)
-    )
-
-    return [
-        {
-            "id": item["id"],
-            "name": item["name"],
-            "type": "folder" if "folder" in item else "file",
-            "size": item.get("size", 0),
-            "modified": item.get("lastModifiedDateTime"),
-            "download_url": item.get("@microsoft.graph.downloadUrl"),
-        }
-        for item in items
-    ]
-
-
-@mcp.tool
-def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any]:
-    """Download a file from OneDrive to local path"""
-    import subprocess
-
-    metadata = graph.request("GET", f"/me/drive/items/{file_id}", account_id)
-    if not metadata:
-        raise ValueError(f"File with ID {file_id} not found")
-
-    download_url = metadata.get("@microsoft.graph.downloadUrl")
-    if not download_url:
-        raise ValueError("No download URL available for this file")
 
     try:
-        subprocess.run(
-            ["curl", "-L", "-o", download_path, download_url],
-            check=True,
-            capture_output=True,
+        me_info = graph.request("GET", "/me")
+        if not me_info or "mail" not in me_info:
+            logger.error("check_availability failed: could not get user email address")
+            raise ValueError("Failed to get user email address")
+
+        schedules = [me_info["mail"]]
+        if attendees:
+            attendees_list = [attendees] if isinstance(attendees, str) else attendees
+            schedules.extend(attendees_list)
+            logger.info(f"check_availability: checking {len(schedules)} schedules")
+
+        payload = {
+            "schedules": schedules,
+            "startTime": {"dateTime": start, "timeZone": "UTC"},
+            "endTime": {"dateTime": end, "timeZone": "UTC"},
+            "availabilityViewInterval": 30,
+        }
+
+        result = graph.request("POST", "/me/calendar/getSchedule", json=payload)
+        if not result:
+            logger.error("check_availability failed: no response from server")
+            raise ValueError("Failed to check availability")
+
+        logger.info(
+            f"check_availability successful: checked availability for {len(schedules)} schedules"
+        )
+        return result
+    except Exception as e:
+        logger.error(f"check_availability failed: {str(e)}", exc_info=True)
+        raise
+
+
+@mcp.tool
+def list_contacts(limit: int = 50) -> list[dict[str, Any]]:
+    """List contacts from the user's address book.
+
+    Retrieves personal contacts with names, email addresses, phone numbers, and other details.
+    Use this to find contact information, get email addresses for sending messages, or browse contacts.
+
+    Args:
+        limit: Maximum number of contacts to retrieve (1-100, defaults to 50)
+
+    Returns:
+        List of contact objects containing:
+        - Names: givenName, surname, displayName, nickname
+        - Email addresses: array of email addresses with labels
+        - Phone numbers: businessPhones, homePhones, mobilePhone
+        - Addresses: business and home addresses
+        - Other: jobTitle, companyName, birthday, notes
+
+    Examples:
+        - list_contacts() - Get first 50 contacts
+        - list_contacts(limit=100) - Get more contacts
+        - Use to find someone's email before sending messages
+    """
+    logger.info(f"list_contacts called: limit={limit}")
+
+    try:
+        params = {"$top": min(limit, 100)}
+
+        contacts = list(
+            graph.request_paginated("/me/contacts", params=params, limit=limit)
         )
 
-        return {
-            "path": download_path,
-            "name": metadata.get("name", "unknown"),
-            "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
-            "mime_type": metadata.get("file", {}).get("mimeType") if metadata else None,
+        logger.info(f"list_contacts successful: retrieved {len(contacts)} contacts")
+        return contacts
+    except Exception as e:
+        logger.error(f"list_contacts failed: {str(e)}", exc_info=True)
+        raise
+
+
+@mcp.tool
+def get_contact(contact_id: str) -> dict[str, Any]:
+    """Get detailed information for a specific contact by ID.
+
+    Retrieves complete contact details including all phone numbers, email addresses,
+    postal addresses, and personal information. Use after finding contacts with list_contacts
+    or search_contacts when you need full contact details.
+
+    Args:
+        contact_id: Unique identifier of the contact (get from list_contacts or search results)
+
+    Returns:
+        Complete contact object containing:
+        - Names: givenName, surname, displayName, nickname, title
+        - Communications: emailAddresses array, businessPhones, homePhones, mobilePhone
+        - Addresses: businessAddress, homeAddress with street, city, state, country, postalCode
+        - Professional: jobTitle, companyName, department, officeLocation
+        - Personal: birthday, spouseName, children, personalNotes
+        - Categories: assigned category tags
+
+    Examples:
+        - get_contact("AAMkAD...") - Get full contact details
+        - Use to get complete info after finding contact in search results
+    """
+    logger.info(f"get_contact called: contact_id={contact_id}")
+
+    try:
+        result = graph.request("GET", f"/me/contacts/{contact_id}")
+        if not result:
+            logger.error(f"get_contact failed: Contact with ID {contact_id} not found")
+            raise ValueError(f"Contact with ID {contact_id} not found")
+
+        logger.info(f"get_contact successful: retrieved contact {contact_id}")
+        return result
+    except Exception as e:
+        logger.error(
+            f"get_contact failed for contact_id={contact_id}: {str(e)}", exc_info=True
+        )
+        raise
+
+
+@mcp.tool
+def list_files(path: str = "/", limit: int = 50) -> list[dict[str, Any]]:
+    """List files and folders in OneDrive at a specified path.
+
+    Browse OneDrive contents to see what files and folders are available. Use this to navigate
+    the file system, find documents, or get an overview of stored content.
+
+    Args:
+        path: OneDrive path to browse (default "/" for root). Use forward slashes like "Documents/Projects"
+        limit: Maximum number of items to retrieve (1-100, defaults to 50)
+
+    Returns:
+        List of file/folder objects containing:
+        - Basic info: id, name, type (file/folder), size (bytes), modified (timestamp)
+        - Download info: download_url for direct file access (for files only)
+        - Use 'type' field to distinguish between "file" and "folder"
+        - Size is 0 for folders
+
+    Examples:
+        - list_files() - List root directory contents
+        - list_files(path="Documents") - List contents of Documents folder
+        - list_files(path="Pictures/Vacation", limit=100) - Browse specific folder with more results
+        - Check 'type' field to see if item is file or folder for navigation
+    """
+    logger.info(f"list_files called: path={path}, limit={limit}")
+
+    try:
+        endpoint = (
+            "/me/drive/root/children"
+            if path == "/"
+            else f"/me/drive/root:/{path}:/children"
+        )
+        params = {
+            "$top": min(limit, 100),
+            "$select": "id,name,size,lastModifiedDateTime,folder,file,@microsoft.graph.downloadUrl",
         }
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to download file: {e.stderr.decode()}")
+
+        items = list(graph.request_paginated(endpoint, params=params, limit=limit))
+
+        result = [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "type": "folder" if "folder" in item else "file",
+                "size": item.get("size", 0),
+                "modified": item.get("lastModifiedDateTime"),
+                "download_url": item.get("@microsoft.graph.downloadUrl"),
+            }
+            for item in items
+        ]
+
+        logger.info(
+            f"list_files successful: retrieved {len(result)} items from path {path}"
+        )
+        return result
+    except Exception as e:
+        logger.error(f"list_files failed for path={path}: {str(e)}", exc_info=True)
+        raise
 
 
 @mcp.tool
-def create_file(
-    onedrive_path: str, local_file_path: str, account_id: str
-) -> dict[str, Any]:
-    """Upload a local file to OneDrive"""
-    path = pl.Path(local_file_path).expanduser().resolve()
-    data = path.read_bytes()
-    result = graph.upload_large_file(
-        f"/me/drive/root:/{onedrive_path}:", data, account_id
+def get_file(file_id: str, download_path: str) -> dict[str, Any]:
+    """Download a file from OneDrive to a local file path.
+
+    Downloads any file from OneDrive to your local computer. Use this after finding files
+    with list_files or search_files when you need to access the actual file content.
+
+    Args:
+        file_id: Unique identifier of the file (get from list_files or search_files results)
+        download_path: Local file path where to save the downloaded file (e.g., "/tmp/document.pdf")
+
+    Returns:
+        Download result information:
+        - path: Local path where file was saved
+        - name: Original filename from OneDrive
+        - size_mb: File size in megabytes (rounded to 2 decimals)
+        - mime_type: File MIME type (e.g., "application/pdf", "image/jpeg")
+
+    Examples:
+        - get_file("AAMkAD...", "/tmp/report.pdf") - Download specific file
+        - get_file(file_id, "~/Downloads/document.docx") - Download to Downloads folder
+        - Use file_id from list_files() or search_files() results
+    """
+    logger.info(f"get_file called: file_id={file_id}, download_path={download_path}")
+
+    try:
+        import subprocess
+
+        metadata = graph.request("GET", f"/me/drive/items/{file_id}")
+        if not metadata:
+            logger.error(f"get_file failed: File with ID {file_id} not found")
+            raise ValueError(f"File with ID {file_id} not found")
+
+        download_url = metadata.get("@microsoft.graph.downloadUrl")
+        if not download_url:
+            logger.error(
+                f"get_file failed: No download URL available for file {file_id}"
+            )
+            raise ValueError("No download URL available for this file")
+
+        try:
+            subprocess.run(
+                ["curl", "-L", "-o", download_path, download_url],
+                check=True,
+                capture_output=True,
+            )
+
+            result = {
+                "path": download_path,
+                "name": metadata.get("name", "unknown"),
+                "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
+                "mime_type": (
+                    metadata.get("file", {}).get("mimeType") if metadata else None
+                ),
+            }
+
+            logger.info(
+                f"get_file successful: downloaded {result['name']} ({result['size_mb']} MB) to {download_path}"
+            )
+            return result
+        except subprocess.CalledProcessError as e:
+            logger.error(f"get_file failed: curl command failed - {e.stderr.decode()}")
+            raise RuntimeError(f"Failed to download file: {e.stderr.decode()}")
+    except Exception as e:
+        logger.error(f"get_file failed for file_id={file_id}: {str(e)}", exc_info=True)
+        raise
+
+
+@mcp.tool
+def get_attachment(email_id: str, attachment_id: str, save_path: str) -> dict[str, Any]:
+    """Download an email attachment to a local file path.
+
+    Downloads attachments from emails (documents, images, etc.) to your local computer.
+    Use this after finding emails with attachments via get_email() when you need the actual attachment files.
+
+    Args:
+        email_id: Unique identifier of the email containing the attachment
+        attachment_id: Unique identifier of the specific attachment (from get_email attachments list)
+        save_path: Local file path where to save the attachment (e.g., "/tmp/attachment.pdf")
+
+    Returns:
+        Attachment download information:
+        - name: Original filename of the attachment
+        - content_type: MIME type (e.g., "application/pdf", "image/jpeg", "text/plain")
+        - size: File size in bytes
+        - saved_to: Absolute local path where file was saved
+
+    Examples:
+        - get_attachment(email_id, attachment_id, "/tmp/document.pdf") - Download specific attachment
+        - get_attachment(email_id, attachment_id, "~/Downloads/image.jpg") - Save to Downloads
+        - First use get_email() to see what attachments are available, then download specific ones
+    """
+    logger.info(
+        f"get_attachment called: email_id={email_id}, attachment_id={attachment_id}, save_path={save_path}"
     )
-    if not result:
-        raise ValueError(f"Failed to create file at path: {onedrive_path}")
-    return result
 
+    try:
+        result = graph.request(
+            "GET", f"/me/messages/{email_id}/attachments/{attachment_id}"
+        )
 
-@mcp.tool
-def update_file(file_id: str, local_file_path: str, account_id: str) -> dict[str, Any]:
-    """Update OneDrive file content from a local file"""
-    path = pl.Path(local_file_path).expanduser().resolve()
-    data = path.read_bytes()
-    result = graph.upload_large_file(f"/me/drive/items/{file_id}", data, account_id)
-    if not result:
-        raise ValueError(f"Failed to update file with ID: {file_id}")
-    return result
+        if not result:
+            logger.error(
+                f"get_attachment failed: Attachment {attachment_id} not found in email {email_id}"
+            )
+            raise ValueError("Attachment not found")
 
+        if "contentBytes" not in result:
+            logger.error(
+                f"get_attachment failed: Attachment content not available for {attachment_id}"
+            )
+            raise ValueError("Attachment content not available")
 
-@mcp.tool
-def delete_file(file_id: str, account_id: str) -> dict[str, str]:
-    """Delete a file or folder"""
-    graph.request("DELETE", f"/me/drive/items/{file_id}", account_id)
-    return {"status": "deleted"}
+        # Save attachment to file
+        path = pl.Path(save_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content_bytes = base64.b64decode(result["contentBytes"])
+        path.write_bytes(content_bytes)
 
+        attachment_result = {
+            "name": result.get("name", "unknown"),
+            "content_type": result.get("contentType", "application/octet-stream"),
+            "size": result.get("size", 0),
+            "saved_to": str(path),
+        }
 
-@mcp.tool
-def get_attachment(
-    email_id: str, attachment_id: str, save_path: str, account_id: str
-) -> dict[str, Any]:
-    """Download email attachment to a specified file path"""
-    result = graph.request(
-        "GET", f"/me/messages/{email_id}/attachments/{attachment_id}", account_id
-    )
-
-    if not result:
-        raise ValueError("Attachment not found")
-
-    if "contentBytes" not in result:
-        raise ValueError("Attachment content not available")
-
-    # Save attachment to file
-    path = pl.Path(save_path).expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content_bytes = base64.b64decode(result["contentBytes"])
-    path.write_bytes(content_bytes)
-
-    return {
-        "name": result.get("name", "unknown"),
-        "content_type": result.get("contentType", "application/octet-stream"),
-        "size": result.get("size", 0),
-        "saved_to": str(path),
-    }
+        logger.info(
+            f"get_attachment successful: saved {attachment_result['name']} ({attachment_result['size']} bytes) to {save_path}"
+        )
+        return attachment_result
+    except Exception as e:
+        logger.error(
+            f"get_attachment failed for email_id={email_id}, attachment_id={attachment_id}: {str(e)}",
+            exc_info=True,
+        )
+        raise
 
 
 @mcp.tool
 def search_files(
     query: str,
-    account_id: str,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search for files in OneDrive using the modern search API."""
-    items = list(graph.search_query(query, ["driveItem"], account_id, limit))
+    """Search for files and folders in OneDrive using text queries.
 
-    return [
-        {
-            "id": item["id"],
-            "name": item["name"],
-            "type": "folder" if "folder" in item else "file",
-            "size": item.get("size", 0),
-            "modified": item.get("lastModifiedDateTime"),
-            "download_url": item.get("@microsoft.graph.downloadUrl"),
-        }
-        for item in items
-    ]
+    Find files by name, content, or metadata across your entire OneDrive. More powerful than
+    browsing folders - searches filenames, document content, and file properties.
+
+    Args:
+        query: Search terms to find files (e.g., "budget report", "vacation photos", "presentation")
+        limit: Maximum number of results to return (1-100, defaults to 50)
+
+    Returns:
+        List of matching file/folder objects containing:
+        - Basic info: id, name, type (file/folder), size (bytes), modified (timestamp)
+        - Download info: download_url for direct file access (for files only)
+        - Results ranked by relevance to search query
+
+    Examples:
+        - search_files("presentation") - Find files with "presentation" in name or content
+        - search_files("budget 2024") - Find budget-related files from 2024
+        - search_files("photos vacation") - Find vacation photos
+        - search_files(".pdf report") - Find PDF files containing "report"
+    """
+    logger.info(f"search_files called: query='{query}', limit={limit}")
+
+    try:
+        items = list(graph.search_query(query, ["driveItem"], limit))
+
+        result = [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "type": "folder" if "folder" in item else "file",
+                "size": item.get("size", 0),
+                "modified": item.get("lastModifiedDateTime"),
+                "download_url": item.get("@microsoft.graph.downloadUrl"),
+            }
+            for item in items
+        ]
+
+        logger.info(
+            f"search_files successful: found {len(result)} files matching '{query}'"
+        )
+        return result
+    except Exception as e:
+        logger.error(
+            f"search_files failed for query='{query}': {str(e)}", exc_info=True
+        )
+        raise
 
 
 @mcp.tool
 def search_emails(
     query: str,
-    account_id: str,
     limit: int = 50,
     folder: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search emails using the modern search API."""
-    if folder:
-        # For folder-specific search, use the traditional endpoint
-        folder_path = FOLDERS.get(folder.casefold(), folder)
-        endpoint = f"/me/mailFolders/{folder_path}/messages"
+    """Search for emails using text queries across subjects, content, and metadata.
 
-        params = {
-            "$search": f'"{query}"',
-            "$top": min(limit, 100),
-            "$select": "id,subject,from,toRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead",
-        }
+    Find emails by searching subject lines, body content, sender/recipient names, and other metadata.
+    Can search across all emails or within a specific folder. More powerful than browsing folders.
 
-        return list(
-            graph.request_paginated(endpoint, account_id, params=params, limit=limit)
+    Args:
+        query: Search terms (e.g., "meeting notes", "project update", sender name, subject keywords)
+        limit: Maximum number of results to return (1-100, defaults to 50)
+        folder: Optional folder to search within ("inbox", "sent", "drafts", etc.). If None, searches all emails
+
+    Returns:
+        List of matching email objects containing:
+        - Basic info: id, subject, from, toRecipients, receivedDateTime, isRead
+        - Indicators: hasAttachments, conversationId
+        - Body content (if available)
+        - Results ranked by relevance to search query
+        - a deep link to the conversation as `conversation_url` that can be shown to the user to open the email
+
+    Examples:
+        - search_emails("project alpha") - Find emails about "project alpha" anywhere
+        - search_emails("meeting", folder="inbox") - Find meeting emails only in inbox
+        - search_emails("emails received today") - Finds emails from today
+        - search_emails("john.doe@company.com") - Find emails from/to specific person
+        - search_emails("budget approval") - Find emails about budget approvals
+    """
+    logger.info(
+        f"search_emails called: query='{query}', limit={limit}, folder={folder}"
+    )
+
+    try:
+        if folder:
+            # For folder-specific search, use the traditional endpoint
+            folder_path = FOLDERS.get(folder.casefold(), folder)
+            endpoint = f"/me/mailFolders/{folder_path}/messages"
+
+            params = {
+                "$search": f'"{query}"',
+                "$top": min(limit, 100),
+                "$select": "id,subject,from,toRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead",
+            }
+
+            result = list(graph.request_paginated(endpoint, params=params, limit=limit))
+            for email in result:
+                if "conversationId" in email:
+                    email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+                # tidy up to save tokens
+                for key in [
+                    "@odata.context",
+                    "@odata.etag",
+                    "parentFolderId",
+                    "changeKey",
+                    "internetMessageId",
+                    "isDeliveryReceiptRequested",
+                    "isReadReceiptRequested",
+                ]:
+                    if key in email:
+                        del email[key]
+
+            logger.info(
+                f"search_emails successful: found {len(result)} emails in folder '{folder}' matching '{query}'"
+            )
+            return result
+
+        result = list(graph.search_query(query, ["message"], limit))
+        for email in result:
+            if "conversationId" in email:
+                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+            # tidy up to save tokens
+            for key in [
+                "@odata.context",
+                "@odata.etag",
+                "parentFolderId",
+                "changeKey",
+                "internetMessageId",
+                "isDeliveryReceiptRequested",
+                "isReadReceiptRequested",
+            ]:
+                if key in email:
+                    del email[key]
+
+
+        logger.info(
+            f"search_emails successful: found {len(result)} emails matching '{query}'"
         )
-
-    return list(graph.search_query(query, ["message"], account_id, limit))
+        return result
+    except Exception as e:
+        logger.error(
+            f"search_emails failed for query='{query}', folder={folder}: {str(e)}",
+            exc_info=True,
+        )
+        raise
 
 
 @mcp.tool
 def search_events(
     query: str,
-    account_id: str,
-    days_ahead: int = 365,
-    days_back: int = 365,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search calendar events using the modern search API."""
-    events = list(graph.search_query(query, ["event"], account_id, limit))
+    """Search for calendar events using text queries across titles, content, and metadata.
 
-    # Filter by date range if needed
-    if days_ahead != 365 or days_back != 365:
-        now = dt.datetime.now(dt.timezone.utc)
-        start = now - dt.timedelta(days=days_back)
-        end = now + dt.timedelta(days=days_ahead)
+    Find calendar events by searching event titles, descriptions, locations, and attendee information.
+    Useful for finding specific meetings, events with certain keywords, or events in particular locations.
 
-        filtered_events = []
-        for event in events:
-            event_start = dt.datetime.fromisoformat(
-                event.get("start", {}).get("dateTime", "").replace("Z", "+00:00")
-            )
-            event_end = dt.datetime.fromisoformat(
-                event.get("end", {}).get("dateTime", "").replace("Z", "+00:00")
-            )
+    Args:
+        query: Search terms (e.g., "team meeting", "conference room", "project review", attendee names)
+        limit: Maximum number of results to return (1-100, defaults to 50)
 
-            if event_start <= end and event_end >= start:
-                filtered_events.append(event)
+    Returns:
+        List of matching calendar event objects containing:
+        - Basic info: id, subject, start/end times, location, organizer
+        - Details: body/description, attendees, isAllDay status
+        - Meeting info: onlineMeeting links if applicable
+        - Recurrence: seriesMasterId for recurring events
+        - Results ranked by relevance to search query
 
-        return filtered_events
+    Examples:
+        - search_events("standup") - Find daily standup meetings
+        - search_events("conference room A") - Find events in specific room
+        - search_events("john smith") - Find events with John Smith as organizer/attendee
+        - search_events("quarterly review") - Find quarterly review meetings
+    """
+    logger.info(f"search_events called: query='{query}', limit={limit}")
 
-    return events
+    try:
+        events = list(graph.search_query(query, ["event"], limit))
+
+        logger.info(
+            f"search_events successful: found {len(events)} events matching '{query}'"
+        )
+        return events
+    except Exception as e:
+        logger.error(
+            f"search_events failed for query='{query}': {str(e)}", exc_info=True
+        )
+        raise
 
 
 @mcp.tool
 def search_contacts(
     query: str,
-    account_id: str,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search contacts. Uses traditional search since unified_search doesn't support contacts."""
-    params = {
-        "$search": f'"{query}"',
-        "$top": min(limit, 100),
-    }
+    """Search for contacts using text queries across names, email addresses, and other fields.
 
-    contacts = list(
-        graph.request_paginated("/me/contacts", account_id, params=params, limit=limit)
-    )
+    Find contacts by searching names, email addresses, phone numbers, company names, and other
+    contact information. More efficient than browsing all contacts when looking for specific people.
 
-    return contacts
+    Args:
+        query: Search terms (e.g., person name, email address, company name, phone number)
+        limit: Maximum number of results to return (1-100, defaults to 50)
 
+    Returns:
+        List of matching contact objects containing:
+        - Names: givenName, surname, displayName, nickname
+        - Communications: emailAddresses, businessPhones, homePhones, mobilePhone
+        - Professional: jobTitle, companyName, department
+        - Addresses: business and home address information
+        - Results ranked by relevance to search query
 
-@mcp.tool
-def unified_search(
-    query: str,
-    account_id: str,
-    entity_types: list[str] | None = None,
-    limit: int = 50,
-) -> dict[str, list[dict[str, Any]]]:
-    """Search across multiple Microsoft 365 resources using the modern search API
-
-    entity_types can include: 'message', 'event', 'drive', 'driveItem', 'list', 'listItem', 'site'
-    If not specified, searches across all available types.
+    Examples:
+        - search_contacts("john") - Find contacts with "john" in their name
+        - search_contacts("microsoft") - Find contacts who work at Microsoft
+        - search_contacts("john.doe@company.com") - Find contact with specific email
+        - search_contacts("555-0123") - Find contact with specific phone number
     """
-    if not entity_types:
-        entity_types = ["message", "event", "driveItem"]
+    logger.info(f"search_contacts called: query='{query}', limit={limit}")
 
-    results = {entity_type: [] for entity_type in entity_types}
+    try:
+        params = {
+            "$search": f'"{query}"',
+            "$top": min(limit, 100),
+        }
 
-    items = list(graph.search_query(query, entity_types, account_id, limit))
+        contacts = list(
+            graph.request_paginated("/me/contacts", params=params, limit=limit)
+        )
 
-    for item in items:
-        resource_type = item.get("@odata.type", "").split(".")[-1]
-
-        if resource_type == "message":
-            results.setdefault("message", []).append(item)
-        elif resource_type == "event":
-            results.setdefault("event", []).append(item)
-        elif resource_type in ["driveItem", "file", "folder"]:
-            results.setdefault("driveItem", []).append(item)
-        else:
-            results.setdefault("other", []).append(item)
-
-    return {k: v for k, v in results.items() if v}
+        logger.info(
+            f"search_contacts successful: found {len(contacts)} contacts matching '{query}'"
+        )
+        return contacts
+    except Exception as e:
+        logger.error(
+            f"search_contacts failed for query='{query}': {str(e)}", exc_info=True
+        )
+        raise

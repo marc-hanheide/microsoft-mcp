@@ -1,7 +1,7 @@
 import httpx
 import time
-from typing import Any, Iterator
-from .auth import get_token
+from typing import Any, Iterator, Optional
+from .auth import AzureAuthentication
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
 # 15 x 320 KiB = 4,915,200 bytes
@@ -9,18 +9,36 @@ UPLOAD_CHUNK_SIZE = 15 * 320 * 1024
 
 _client = httpx.Client(timeout=30.0, follow_redirects=True)
 
+# Global auth instance
+_global_auth: Optional[AzureAuthentication] = None
+
+
+def set_auth_instance(auth: AzureAuthentication) -> None:
+    """Set the global authentication instance for the graph module"""
+    global _global_auth
+    _global_auth = auth
+
+
+def get_auth_instance() -> AzureAuthentication:
+    """Get the global authentication instance, creating one if needed"""
+    global _global_auth
+    if _global_auth is None:
+        _global_auth = AzureAuthentication()
+    return _global_auth
+
 
 def request(
     method: str,
     path: str,
-    account_id: str | None = None,
     params: dict[str, Any] | None = None,
     json: dict[str, Any] | None = None,
     data: bytes | None = None,
     max_retries: int = 3,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any] | None:
+    auth_instance = auth or get_auth_instance()
     headers = {
-        "Authorization": f"Bearer {get_token(account_id)}",
+        "Authorization": f"Bearer {auth_instance.get_token()}",
     }
 
     if method == "GET":
@@ -85,9 +103,9 @@ def request(
 
 def request_paginated(
     path: str,
-    account_id: str | None = None,
     params: dict[str, Any] | None = None,
     limit: int | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> Iterator[dict[str, Any]]:
     """Make paginated requests following @odata.nextLink"""
     items_returned = 0
@@ -95,9 +113,9 @@ def request_paginated(
 
     while True:
         if next_link:
-            result = request("GET", next_link.replace(BASE_URL, ""), account_id)
+            result = request("GET", next_link.replace(BASE_URL, ""), auth=auth)
         else:
-            result = request("GET", path, account_id, params=params)
+            result = request("GET", path, params=params, auth=auth)
 
         if not result:
             break
@@ -115,9 +133,10 @@ def request_paginated(
 
 
 def download_raw(
-    path: str, account_id: str | None = None, max_retries: int = 3
+    path: str, max_retries: int = 3, auth: Optional[AzureAuthentication] = None
 ) -> bytes:
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    auth_instance = auth or get_auth_instance()
+    headers = {"Authorization": f"Bearer {auth_instance.get_token()}"}
 
     retry_count = 0
     while retry_count <= max_retries:
@@ -200,12 +219,12 @@ def _do_chunked_upload(
 
 def create_upload_session(
     path: str,
-    account_id: str | None = None,
     item_properties: dict[str, Any] | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Create an upload session for large files"""
     payload = {"item": item_properties or {}}
-    result = request("POST", f"{path}/createUploadSession", account_id, json=payload)
+    result = request("POST", f"{path}/createUploadSession", json=payload, auth=auth)
     if not result:
         raise ValueError("Failed to create upload session")
     return result
@@ -214,36 +233,37 @@ def create_upload_session(
 def upload_large_file(
     path: str,
     data: bytes,
-    account_id: str | None = None,
     item_properties: dict[str, Any] | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Upload a large file using upload sessions"""
     file_size = len(data)
 
     if file_size <= UPLOAD_CHUNK_SIZE:
-        result = request("PUT", f"{path}/content", account_id, data=data)
+        result = request("PUT", f"{path}/content", data=data, auth=auth)
         if not result:
             raise ValueError("Failed to upload file")
         return result
 
-    session = create_upload_session(path, account_id, item_properties)
+    session = create_upload_session(path, item_properties, auth=auth)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    auth_instance = auth or get_auth_instance()
+    headers = {"Authorization": f"Bearer {auth_instance.get_token()}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def create_mail_upload_session(
     message_id: str,
     attachment_item: dict[str, Any],
-    account_id: str | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Create an upload session for large mail attachments"""
     result = request(
         "POST",
         f"/me/messages/{message_id}/attachments/createUploadSession",
-        account_id,
         json={"AttachmentItem": attachment_item},
+        auth=auth,
     )
     if not result:
         raise ValueError("Failed to create mail attachment upload session")
@@ -254,8 +274,8 @@ def upload_large_mail_attachment(
     message_id: str,
     name: str,
     data: bytes,
-    account_id: str | None = None,
     content_type: str = "application/octet-stream",
+    auth: Optional[AzureAuthentication] = None,
 ) -> dict[str, Any]:
     """Upload a large mail attachment using upload sessions"""
     file_size = len(data)
@@ -267,25 +287,46 @@ def upload_large_mail_attachment(
         "contentType": content_type,
     }
 
-    session = create_mail_upload_session(message_id, attachment_item, account_id)
+    session = create_mail_upload_session(message_id, attachment_item, auth=auth)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    auth_instance = auth or get_auth_instance()
+    headers = {"Authorization": f"Bearer {auth_instance.get_token()}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def search_query(
     query: str,
     entity_types: list[str],
-    account_id: str | None = None,
     limit: int = 50,
     fields: list[str] | None = None,
+    auth: Optional[AzureAuthentication] = None,
 ) -> Iterator[dict[str, Any]]:
     """Use the modern /search/query API endpoint"""
+    # Validate entity types - Microsoft Graph search has specific requirements
+    valid_entity_types = {
+        "message",
+        "event",
+        "driveItem",
+        "list",
+        "listItem",
+        "site",
+        "drive",
+        "chatMessage",
+        "person"
+    }
+
+    # Filter to only valid entity types
+    filtered_entity_types = [et for et in entity_types if et in valid_entity_types]
+
+    if not filtered_entity_types:
+        # If no valid entity types, return empty iterator
+        return iter([])
+
     payload = {
         "requests": [
             {
-                "entityTypes": entity_types,
+                "entityTypes": filtered_entity_types,
                 "query": {"queryString": query},
                 "size": min(limit, 25),
                 "from": 0,
@@ -293,38 +334,86 @@ def search_query(
         ]
     }
 
+    # Add fields if specified
     if fields:
         payload["requests"][0]["fields"] = fields
+
+    # Add stored fields for better results
+    payload["requests"][0]["storedFields"] = [
+        "id",
+        "name",
+        "subject",
+        "body",
+        "from",
+        "to",
+        "receivedDateTime",
+        "lastModifiedDateTime",
+        "size",
+        "contentType",
+    ]
 
     items_returned = 0
 
     while True:
-        result = request("POST", "/search/query", account_id, json=payload)
+        try:
+            result = request("POST", "/search/query", json=payload, auth=auth)
 
-        if not result or "value" not in result:
-            break
+            if not result or "value" not in result:
+                break
 
-        for response in result["value"]:
-            if "hitsContainers" in response:
-                for container in response["hitsContainers"]:
-                    if "hits" in container:
-                        for hit in container["hits"]:
-                            if limit and items_returned >= limit:
-                                return
-                            yield hit["resource"]
-                            items_returned += 1
+            for response in result["value"]:
+                if "hitsContainers" in response:
+                    for container in response["hitsContainers"]:
+                        if "hits" in container:
+                            for hit in container["hits"]:
+                                if limit and items_returned >= limit:
+                                    return
+                                yield hit["resource"]
+                                items_returned += 1
 
-        if "@odata.nextLink" in result:
-            break
+            # Check for more results
+            has_more = False
+            for response in result.get("value", []):
+                for container in response.get("hitsContainers", []):
+                    if container.get("moreResultsAvailable"):
+                        has_more = True
+                        break
 
-        has_more = False
-        for response in result.get("value", []):
-            for container in response.get("hitsContainers", []):
-                if container.get("moreResultsAvailable"):
-                    has_more = True
-                    break
+            if not has_more:
+                break
 
-        if not has_more:
-            break
+            # Update from parameter for next batch
+            payload["requests"][0]["from"] += payload["requests"][0]["size"]
 
-        payload["requests"][0]["from"] += payload["requests"][0]["size"]
+        except httpx.HTTPStatusError as e:
+            # Handle specific HTTP status codes
+            status_code = e.response.status_code
+            if status_code == 400:
+                raise ValueError(
+                    f"Bad request - invalid search query or parameters: {e}"
+                )
+            elif status_code == 401:
+                raise PermissionError(f"Unauthorized - authentication failed: {e}")
+            elif status_code == 403:
+                raise PermissionError(
+                    f"Forbidden - insufficient permissions for search: {e}"
+                )
+            elif status_code == 404:
+                raise ValueError(f"Search endpoint not found: {e}")
+            elif status_code == 429:
+                # Rate limiting - this should be handled by the request function already
+                raise RuntimeError(f"Rate limited - too many search requests: {e}")
+            elif status_code >= 500:
+                raise RuntimeError(
+                    f"Server error during search (status {status_code}): {e}"
+                )
+            else:
+                raise RuntimeError(
+                    f"HTTP error during search (status {status_code}): {e}"
+                )
+        except httpx.RequestError as e:
+            # Handle network/connection errors
+            raise ConnectionError(f"Network error during search query: {e}")
+        except Exception as e:
+            # Handle other unexpected errors
+            raise RuntimeError(f"Unexpected error during search query: {e}")
