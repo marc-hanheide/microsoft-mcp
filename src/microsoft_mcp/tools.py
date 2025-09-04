@@ -339,7 +339,8 @@ def get_email(
 def list_events(
     days_ahead: int = 7,
     days_back: int = 0,
-    include_details: bool = True,
+    max_body_length: int = 500,
+    include_details: bool = False,
 ) -> list[dict[str, Any]]:
     """List calendar events within a specified date range.
 
@@ -361,7 +362,7 @@ def list_events(
         - list_events() - Get next 7 days of events
         - list_events(days_ahead=30) - Get next 30 days of events
         - list_events(days_back=7, days_ahead=7) - Get events from past week to next week
-        - list_events(include_details=False) - Get basic event info only for faster response
+        - list_events(include_details=False) - Get basic event info only for faster and shorter response
     """
     logger.info(
         f"list_events called: days_ahead={days_ahead}, days_back={days_back}, include_details={include_details}"
@@ -388,6 +389,12 @@ def list_events(
 
         # Use calendarView to get recurring event instances
         events = list(graph.request_paginated("/me/calendarView", params=params))
+
+        # truncate the body content if it exceeds max_body_length
+        for event in events:
+            if "body" in event:
+                if "content" in event["body"] and len(event["body"]["content"]) > max_body_length:
+                    event["body"]["content"] = event["body"]["content"][:max_body_length] + "..."
 
         logger.info(
             f"list_events successful: retrieved {len(events)} events from {start} to {end}"
@@ -460,7 +467,8 @@ def check_availability(
         - schedules: Array of availability data for each person checked
         - freeBusyViewType: Type of view (e.g., "freeBusy")
         - For each person: email, availability intervals showing free/busy/tentative status
-        - availabilityView: Numeric representation of availability (0=free, 1=tentative, 2=busy)
+        - availabilityView: Numeric representation of availability (0=free, 1=tentative, 2=busy), 
+          each number represents a 30-minute interval within the specified time range, starting from the start time.
 
     Examples:
         - check_availability("2024-09-02T14:00:00Z", "2024-09-02T15:00:00Z") - Check your availability
