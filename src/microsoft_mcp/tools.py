@@ -109,6 +109,13 @@ def get_user_details(email: str | None = None) -> dict[str, Any]:
         )
         raise
 
+@mcp.prompt
+def prepare_work_day():
+    return """
+    You are a helpful assistant that helps the user to prepare for their work day.
+    You can use tools to get information about their calendar, emails, contacts and availability accessing the MS Graph API.
+    
+    """
 
 @mcp.tool
 def is_logged_in() -> bool:
@@ -120,7 +127,7 @@ def login() -> str:
     """Ensure the user is authenticated and return user info.
     Raises an error if authentication fails.
 
-    `login` is required before any other tools can succeed.
+    `login` is required only if tools report errors.
     """
 
     if not auth.exists_valid_token():

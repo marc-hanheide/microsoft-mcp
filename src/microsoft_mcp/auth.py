@@ -105,10 +105,10 @@ class AzureAuthentication:
         Args:
             auth_record_file: Path to AuthenticationRecord file (defaults to ~/.azure-graph-auth.json)
         """
-        self.auth_record_file = auth_record_file or (
+        self.auth_record_file = Path(auth_record_file) or (
             Path.home() / ".ms-graph-mcp-azure-auth-record.json"
         )
-        self.token_cache_file = token_cache_file or (
+        self.token_cache_file = Path(token_cache_file) or (
             Path.home() / ".ms-graph-mcp-azure-token-cache"
             # the actual name will have a `nocae` suffix
         )
