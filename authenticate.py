@@ -48,7 +48,10 @@ def main():
     print()
 
     # Get auth instance
-    auth = AzureAuthentication()
+    auth = AzureAuthentication(
+        auth_record_file=os.getenv("AZURE_CRED_CACHE_FILE"),
+        token_cache_file=os.getenv("AZURE_TOKEN_CACHE_FILE")
+    )
 
     # Set the auth instance for the graph module
     graph.set_auth_instance(auth)

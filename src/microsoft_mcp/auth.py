@@ -105,13 +105,17 @@ class AzureAuthentication:
         Args:
             auth_record_file: Path to AuthenticationRecord file (defaults to ~/.azure-graph-auth.json)
         """
-        self.auth_record_file = Path(auth_record_file) or (
-            Path.home() / ".ms-graph-mcp-azure-auth-record.json"
-        )
-        self.token_cache_file = Path(token_cache_file) or (
-            Path.home() / ".ms-graph-mcp-azure-token-cache"
-            # the actual name will have a `nocae` suffix
-        )
+
+        if auth_record_file:
+            self.auth_record_file = Path(auth_record_file).resolve()
+        else:
+            self.auth_record_file = (Path.home() / ".ms-graph-mcp-azure-auth-record.json").resolve()
+
+        if token_cache_file:
+            self.token_cache_file = Path(token_cache_file).resolve()
+        else:
+            self.token_cache_file = (Path.home() / ".ms-graph-mcp-azure-token-cache").resolve()
+            # the actual name will have a `nocache` suffix
         self._credential_instance = None
 
     def _read_auth_record(self) -> Optional[AuthenticationRecord]:
