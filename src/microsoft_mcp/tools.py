@@ -135,6 +135,8 @@ def list_emails(
     limit: int = 10,
     body_max_length: int = 2000,
     include_body: bool = True,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> list[dict[str, Any]]:
     """List emails from a specified folder in the user's mailbox.
 
@@ -146,6 +148,8 @@ def list_emails(
         limit: Maximum number of emails to retrieve (1-100, defaults to 10)
         body_max_length: Maximum characters for email body content (default 2000, will truncate if longer)
         include_body: Whether to include email body content (affects response size)
+        start_date: Optional start date in ISO format (UTC timezone, e.g., "2024-09-01T00:00:00Z") to filter emails from this date onwards
+        end_date: Optional end date in ISO format (UTC timezone, e.g., "2024-09-30T23:59:59Z") to filter emails up to this date
 
     Returns:
         List of email objects containing id, subject, sender, recipients, date, attachments info,
@@ -155,9 +159,12 @@ def list_emails(
         - list_emails() - Get 10 most recent inbox emails
         - list_emails(folder="sent", limit=20) - Get 20 recent sent emails
         - list_emails(include_body=False) - Get emails without body content for faster response
+        - list_emails(start_date="2024-09-01T00:00:00Z", end_date="2024-09-01T23:59:59Z") - Get emails from September 1st, 2024
+        - list_emails(start_date="2024-08-01T00:00:00Z") - Get emails from August 1st, 2024 onwards
+        - list_emails(end_date="2024-08-31T23:59:59Z") - Get emails up to August 31st, 2024
     """
     logger.info(
-        f"list_emails called: folder={folder}, limit={limit}, include_body={include_body}"
+        f"list_emails called: folder={folder}, limit={limit}, include_body={include_body}, start_date={start_date}, end_date={end_date}"
     )
 
     try:
@@ -173,6 +180,16 @@ def list_emails(
             "$select": select_fields,
             "$orderby": "receivedDateTime desc",
         }
+
+        # Add date filtering if provided
+        filter_conditions = []
+        if start_date:
+            filter_conditions.append(f"receivedDateTime ge {start_date}")
+        if end_date:
+            filter_conditions.append(f"receivedDateTime le {end_date}")
+
+        if filter_conditions:
+            params["$filter"] = " and ".join(filter_conditions)
 
         emails = list(
             graph.request_paginated(
@@ -200,6 +217,11 @@ def list_emails(
 
         logger.info(
             f"list_emails successful: retrieved {len(emails)} emails from folder {folder}"
+            + (
+                f" with date filter start_date={start_date}, end_date={end_date}"
+                if start_date or end_date
+                else ""
+            )
         )
         return emails
     except Exception as e:
@@ -255,7 +277,9 @@ def get_email(
         # Convert HTML to markdown and truncate body if needed
         if include_body and "body" in result and "content" in result["body"]:
             if result["body"]["contentType"].lower() == "html":
-                result["body"]["content"] = convert_to_markdown(result["body"]["content"])
+                result["body"]["content"] = convert_to_markdown(
+                    result["body"]["content"]
+                )
                 result["body"]["contentType"] = "text/markdown"
 
             content = result["body"]["content"]
@@ -273,7 +297,15 @@ def get_email(
             del result["body"]
 
         # tidy up to save tokens
-        for key in ["@odata.context", "@odata.etag", "parentFolderId", "changeKey", "internetMessageId", "isDeliveryReceiptRequested", "isReadReceiptRequested"]:
+        for key in [
+            "@odata.context",
+            "@odata.etag",
+            "parentFolderId",
+            "changeKey",
+            "internetMessageId",
+            "isDeliveryReceiptRequested",
+            "isReadReceiptRequested",
+        ]:
             if key in result:
                 del result[key]
 

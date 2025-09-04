@@ -117,7 +117,8 @@ def request_paginated(path, params=None, limit=None):
 - **Core Operations**: list, get, create_draft, send, reply, reply_all
 - **Management**: update, move, delete
 - **Search**: search_emails, get_attachment
-- **Features**: Attachment support, folder management, thread handling
+- **Features**: Attachment support, folder management, thread handling, date filtering
+- **Date Filtering**: `list_emails` supports `start_date` and `end_date` parameters (ISO format, UTC timezone) for precise email retrieval by date range
 
 ### Calendar Tools (7 tools)
 - **Core Operations**: list_events, get_event, create_event, update_event, delete_event
