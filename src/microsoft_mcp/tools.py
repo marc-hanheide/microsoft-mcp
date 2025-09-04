@@ -141,7 +141,8 @@ def list_emails(
     """List emails from a specified folder in the user's mailbox.
 
     Retrieves emails from common folders like inbox, sent, drafts, etc. Results are ordered by
-    received date (most recent first). Use this to get an overview of emails or find recent messages.
+    received date (most recent first). Use this to get an overview of emails for a specific date range,
+    or find recent messages.
 
     Args:
         folder: Folder name to search in. Options: "inbox", "sent", "drafts", "deleted", "junk", "archive"
@@ -154,6 +155,7 @@ def list_emails(
     Returns:
         List of email objects containing id, subject, sender, recipients, date, attachments info,
         and optionally body content. Each email has fields like 'id', 'subject', 'from', 'receivedDateTime'.
+        The most recent email (within the specified date range) will be the first included in the results.
 
     Examples:
         - list_emails() - Get 10 most recent inbox emails
