@@ -97,6 +97,7 @@ class AzureAuthentication:
     def __init__(
         self,
         auth_record_file: Optional[Path] = None,
+        token_cache_file: Optional[Path] = None,
     ):
         """
         Initialize the Azure Authentication instance.
@@ -105,7 +106,11 @@ class AzureAuthentication:
             auth_record_file: Path to AuthenticationRecord file (defaults to ~/.azure-graph-auth.json)
         """
         self.auth_record_file = auth_record_file or (
-            Path.home() / ".azure-graph-auth.json"
+            Path.home() / ".ms-graph-mcp-azure-auth-record.json"
+        )
+        self.token_cache_file = token_cache_file or (
+            Path.home() / ".ms-graph-mcp-azure-token-cache"
+            # the actual name will have a `nocae` suffix
         )
         self._credential_instance = None
 
@@ -165,7 +170,7 @@ class AzureAuthentication:
 
         # Configure persistent token cache
         token_cache = TokenCachePersistenceOptions(
-            allow_unencrypted_storage=True, name=str(Path.home() / ".azure-graph-mcp-token-cache")
+            allow_unencrypted_storage=True, name=str(self.token_cache_file)
         )
 
         # Try to load existing AuthenticationRecord

@@ -20,8 +20,10 @@ logging.basicConfig(level=logging.INFO)
 mcp = FastMCP("microsoft-graph-mcp")
 # Create a global authentication instance
 
-auth = AzureAuthentication(os.getenv("AZURE_CACHE_FILE"))
-
+auth = AzureAuthentication(
+    auth_record_file=os.getenv("AZURE_CRED_CACHE_FILE"),
+    token_cache_file=os.getenv("AZURE_TOKEN_CACHE_FILE")
+)
 
 # Set the auth instance for the graph module
 graph.set_auth_instance(auth)
