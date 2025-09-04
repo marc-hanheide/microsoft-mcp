@@ -230,7 +230,7 @@ def list_emails(
                             f"list_emails: body truncated from {len(content)} to {body_max_length} characters"
                         )
             if "conversationId" in email:
-                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'], safe='')}"
 
 
         logger.info(
@@ -329,7 +329,7 @@ def get_email(
                 del result[key]
         # add a link to open the whole conversation as "conversation_url"
         if "conversationId" in result:
-            result["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(result['conversationId'])}"
+            result["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(result['conversationId'], safe='')}"
 
         # Remove attachment content bytes to reduce size
         if "attachments" in result and result["attachments"]:
@@ -905,7 +905,7 @@ def search_emails(
             result = list(graph.request_paginated(endpoint, params=params, limit=limit))
             for email in result:
                 if "conversationId" in email:
-                    email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+                    email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'], safe='')}"
                 # tidy up to save tokens
                 for key in [
                     "@odata.context",
@@ -927,7 +927,7 @@ def search_emails(
         result = list(graph.search_query(query, ["message"], limit))
         for email in result:
             if "conversationId" in email:
-                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'], safe='')}"
             # tidy up to save tokens
             for key in [
                 "@odata.context",
