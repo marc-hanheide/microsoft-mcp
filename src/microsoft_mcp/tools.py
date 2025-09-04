@@ -4,6 +4,8 @@ import logging
 import pathlib as pl
 import subprocess
 from typing import Any
+from unittest import result
+from urllib.parse import quote
 from fastmcp import FastMCP
 from . import graph
 from .auth import AzureAuthentication
@@ -156,12 +158,12 @@ def list_emails(
         List of email objects containing id, subject, sender, recipients, date, attachments info,
         and optionally body content. Each email has fields like 'id', 'subject', 'from', 'receivedDateTime'.
         The most recent email (within the specified date range) will be the first included in the results.
-
+        Contains also a deep link to the conversation as `conversation_url` that can be shown to the user to open the email
     Examples:
         - list_emails() - Get 10 most recent inbox emails
         - list_emails(folder="sent", limit=20) - Get 20 recent sent emails
         - list_emails(include_body=False) - Get emails without body content for faster response
-        - list_emails(start_date="2024-09-01T00:00:00Z", end_date="2024-09-01T23:59:59Z") - Get emails from September 1st, 2024
+        - list_emails(start_date="2024-09-01T00:00:00Z", end_date="2024-09-01T23:59:59Z") - Get emails received on September 1st, 2024
         - list_emails(start_date="2024-08-01T00:00:00Z") - Get emails from August 1st, 2024 onwards
         - list_emails(end_date="2024-08-31T23:59:59Z") - Get emails up to August 31st, 2024
     """
@@ -216,6 +218,9 @@ def list_emails(
                         logger.info(
                             f"list_emails: body truncated from {len(content)} to {body_max_length} characters"
                         )
+            if "conversationId" in email:
+                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+
 
         logger.info(
             f"list_emails successful: retrieved {len(emails)} emails from folder {folder}"
@@ -253,9 +258,10 @@ def get_email(
     Returns:
         Email object with complete details including:
         - Basic info: id, subject, from, to, cc, receivedDateTime, isRead
-        - Body: content (HTML/text), contentType, truncation info if applicable
+        - Body: content as text or markdown, contentType, truncation info if applicable
         - Attachments: list with id, name, size, contentType for each attachment
         - Conversation: conversationId for threading
+        - a deep link to the conversation as `conversation_url` that can be shown to the user to open the email
 
     Examples:
         - get_email("AAMkAD...") - Get full email details
@@ -310,6 +316,9 @@ def get_email(
         ]:
             if key in result:
                 del result[key]
+        # add a link to open the whole conversation as "conversation_url"
+        if "conversationId" in result:
+            result["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(result['conversationId'])}"
 
         # Remove attachment content bytes to reduce size
         if "attachments" in result and result["attachments"]:
@@ -849,6 +858,7 @@ def search_emails(
         - Indicators: hasAttachments, conversationId
         - Body content (if available)
         - Results ranked by relevance to search query
+        - a deep link to the conversation as `conversation_url` that can be shown to the user to open the email
 
     Examples:
         - search_emails("project alpha") - Find emails about "project alpha" anywhere
@@ -874,12 +884,45 @@ def search_emails(
             }
 
             result = list(graph.request_paginated(endpoint, params=params, limit=limit))
+            for email in result:
+                if "conversationId" in email:
+                    email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+                # tidy up to save tokens
+                for key in [
+                    "@odata.context",
+                    "@odata.etag",
+                    "parentFolderId",
+                    "changeKey",
+                    "internetMessageId",
+                    "isDeliveryReceiptRequested",
+                    "isReadReceiptRequested",
+                ]:
+                    if key in email:
+                        del email[key]
+
             logger.info(
                 f"search_emails successful: found {len(result)} emails in folder '{folder}' matching '{query}'"
             )
             return result
 
         result = list(graph.search_query(query, ["message"], limit))
+        for email in result:
+            if "conversationId" in email:
+                email["conversation_url"] = f"https://outlook.office.com/mail/deeplink/readconv/{quote(email['conversationId'])}"
+            # tidy up to save tokens
+            for key in [
+                "@odata.context",
+                "@odata.etag",
+                "parentFolderId",
+                "changeKey",
+                "internetMessageId",
+                "isDeliveryReceiptRequested",
+                "isReadReceiptRequested",
+            ]:
+                if key in email:
+                    del email[key]
+
+
         logger.info(
             f"search_emails successful: found {len(result)} emails matching '{query}'"
         )
