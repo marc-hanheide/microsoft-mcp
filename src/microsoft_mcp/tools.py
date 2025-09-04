@@ -1,6 +1,7 @@
 import base64
 import datetime as dt
 import logging
+import os
 import pathlib as pl
 import subprocess
 from typing import Any
@@ -17,9 +18,10 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 mcp = FastMCP("microsoft-graph-mcp")
-
 # Create a global authentication instance
-auth = AzureAuthentication()
+
+auth = AzureAuthentication(os.getenv("AZURE_CACHE_FILE"))
+
 
 # Set the auth instance for the graph module
 graph.set_auth_instance(auth)
