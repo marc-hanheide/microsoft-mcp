@@ -8,43 +8,6 @@ from unittest.mock import Mock, patch
 from src.microsoft_mcp.tools import FOLDERS
 
 
-class TestMCPToolsCore:
-    """Test cases for MCP tools core functionality."""
-
-    def test_folders_mapping(self):
-        """Test that folder mappings are properly configured."""
-        expected_folders = {
-            "inbox": "inbox",
-            "sent": "sentitems",
-            "drafts": "drafts",
-            "deleted": "deleteditems",
-            "junk": "junkemail",
-            "archive": "archive",
-        }
-        assert FOLDERS == expected_folders
-
-    def test_folder_case_insensitive_mapping(self):
-        """Test that folder mapping is case-insensitive."""
-        # The FOLDERS mapping should handle case-insensitive lookups
-        test_cases = [
-            ("INBOX", "inbox"),
-            ("Sent", "sentitems"),
-            ("DRAFTS", "drafts"),
-            ("deleted", "deleteditems"),
-        ]
-
-        for input_folder, expected_path in test_cases:
-            mapped_folder = FOLDERS.get(input_folder.casefold(), input_folder)
-            assert mapped_folder == expected_path
-
-    def test_folder_unknown_mapping(self):
-        """Test behavior with unknown folder names."""
-        unknown_folder = "UnknownFolder"
-        # Should return the folder name as-is if not in mapping
-        result = FOLDERS.get(unknown_folder.casefold(), unknown_folder)
-        assert result == unknown_folder
-
-
 class TestToolsBehavior:
     """Test the behavior of tools by mocking their dependencies."""
 

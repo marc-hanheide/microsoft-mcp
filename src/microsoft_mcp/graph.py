@@ -308,13 +308,12 @@ def search_query(
         "message",
         "event",
         "driveItem",
-        # "list",
-        # "listItem",
-        # "site",
+        "list",
+        "listItem",
+        "site",
         "drive",
         "chatMessage",
-        "person",
-        # "externalItem",
+        "person"
     }
 
     # Filter to only valid entity types

@@ -7,6 +7,8 @@ from typing import Any
 from fastmcp import FastMCP
 from . import graph
 from .auth import AzureAuthentication
+from markitdown import MarkItDown, StreamInfo
+from io import BytesIO
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -20,6 +22,8 @@ auth = AzureAuthentication()
 # Set the auth instance for the graph module
 graph.set_auth_instance(auth)
 
+markitdown = MarkItDown(enable_builtins=True)
+
 FOLDERS = {
     k.casefold(): v
     for k, v in {
@@ -31,6 +35,17 @@ FOLDERS = {
         "archive": "archive",
     }.items()
 }
+
+
+def convert_to_markdown(html: str, mimetype: str = "text/html") -> str:
+    """Convert HTML content to Markdown format."""
+    # Use MarkItDown to convert HTML to Markdown
+    stream = BytesIO()
+    stream.write(html.encode("utf-8"))
+    stream.seek(0)
+    return markitdown.convert(
+        stream, stream_info=StreamInfo(mimetype=mimetype)
+    ).text_content
 
 
 @mcp.tool
@@ -118,6 +133,7 @@ def login() -> str:
 def list_emails(
     folder: str = "inbox",
     limit: int = 10,
+    body_max_length: int = 2000,
     include_body: bool = True,
 ) -> list[dict[str, Any]]:
     """List emails from a specified folder in the user's mailbox.
@@ -128,6 +144,7 @@ def list_emails(
     Args:
         folder: Folder name to search in. Options: "inbox", "sent", "drafts", "deleted", "junk", "archive"
         limit: Maximum number of emails to retrieve (1-100, defaults to 10)
+        body_max_length: Maximum characters for email body content (default 2000, will truncate if longer)
         include_body: Whether to include email body content (affects response size)
 
     Returns:
@@ -165,6 +182,22 @@ def list_emails(
             )
         )
 
+        for email in emails:
+            if include_body:
+                # truncate the body
+                if "body" in email and "content" in email["body"]:
+                    content = email["body"]["content"]
+                    if len(content) > body_max_length:
+                        email["body"]["content"] = (
+                            content[:body_max_length]
+                            + f"\n\n[Content truncated - {len(content)} total characters]"
+                        )
+                        email["body"]["truncated"] = True
+                        email["body"]["total_length"] = len(content)
+                        logger.info(
+                            f"list_emails: body truncated from {len(content)} to {body_max_length} characters"
+                        )
+
         logger.info(
             f"list_emails successful: retrieved {len(emails)} emails from folder {folder}"
         )
@@ -178,7 +211,7 @@ def list_emails(
 def get_email(
     email_id: str,
     include_body: bool = True,
-    body_max_length: int = 50000,
+    body_max_length: int = 5000,
     include_attachments: bool = True,
 ) -> dict[str, Any]:
     """Get detailed information about a specific email by its ID.
@@ -219,8 +252,12 @@ def get_email(
             logger.error(f"get_email failed: Email with ID {email_id} not found")
             raise ValueError(f"Email with ID {email_id} not found")
 
-        # Truncate body if needed
+        # Convert HTML to markdown and truncate body if needed
         if include_body and "body" in result and "content" in result["body"]:
+            if result["body"]["contentType"].lower() == "html":
+                result["body"]["content"] = convert_to_markdown(result["body"]["content"])
+                result["body"]["contentType"] = "text/markdown"
+
             content = result["body"]["content"]
             if len(content) > body_max_length:
                 result["body"]["content"] = (
@@ -234,6 +271,11 @@ def get_email(
                 )
         elif not include_body and "body" in result:
             del result["body"]
+
+        # tidy up to save tokens
+        for key in ["@odata.context", "@odata.etag", "parentFolderId", "changeKey", "internetMessageId", "isDeliveryReceiptRequested", "isReadReceiptRequested"]:
+            if key in result:
+                del result[key]
 
         # Remove attachment content bytes to reduce size
         if "attachments" in result and result["attachments"]:
