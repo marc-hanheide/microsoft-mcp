@@ -165,7 +165,7 @@ class AzureAuthentication:
 
         # Configure persistent token cache
         token_cache = TokenCachePersistenceOptions(
-            allow_unencrypted_storage=True, name=Path.home() / ".azure-token-cache"
+            allow_unencrypted_storage=True, name=str(Path.home() / ".azure-graph-mcp-token-cache")
         )
 
         # Try to load existing AuthenticationRecord
