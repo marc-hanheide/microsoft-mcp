@@ -911,14 +911,12 @@ def search_communication(
     query: str,
     limit: int = 10,
     kql_filters: str | None = None,
-    include_body: bool = False,
-    body_max_length: int = 1000,
 ) -> dict[str, Any]:
     """Search for communication content including emails and Teams messages using Microsoft Search API.
 
     Searches across Outlook emails and Teams chat/channel messages to find relevant communications.
-    Supports advanced KQL (Keyword Query Language) filters for precise search results and
-    efficient token usage. Body content can be included as markdown for LLM processing.
+    Returns metadata and summary information needed to subsequently retrieve full message details
+    using get_email, get_chat_message, or get_channel_message tools.
 
     Args:
         query: Search terms or KQL query string (e.g., "project meeting", "budget discussion")
@@ -930,33 +928,31 @@ def search_communication(
             - "IsMentioned:true" - Teams messages where you're mentioned
             - "received>=2024-09-01 AND received<=2024-09-30" - Messages from September 2024
             - "hasAttachments:true" - Messages with attachments
-        include_body: Whether to include full message body/content (increases response size)
-        body_max_length: Maximum characters for body content when included (default 1000)
 
     Returns:
         Search results containing:
         - summary: Search statistics (total results, entity type breakdown)
         - results: Array of matching communication items with:
-            - All original fields from Microsoft Graph API
+            - All original fields from Microsoft Graph API (id, subject, from, dates, etc.)
             - entity_type: "message" for emails or "chatMessage" for Teams messages
             - search_rank: Search relevance score
-            - search_summary: Brief content preview from search
-            - conversation_url: Deep link for messages (when available)
-            - body: Full content as markdown if include_body=True (HTML converted to markdown)
+            - search_summary: Brief content preview from search results
+            - conversation_url: Deep link for emails (when available)
+            - For emails: hitId can be used with get_email(hitId) to retrieve full content
+            - For chat messages: chatId and id fields can be used with get_chat_message(chatId, id)
 
     Examples:
         - search_communication("budget meeting") - Find emails and Teams messages about budget meetings
         - search_communication("project update", kql_filters="from:manager@company.com") - Updates from manager
         - search_communication("quarterly report", kql_filters="sent>=2024-07-01") - Recent quarterly reports
         - search_communication("", kql_filters="IsMentioned:true AND received>=2024-09-01") - Recent mentions
-        - search_communication("important", include_body=True) - Important messages with full content
 
-    Note: KQL filters provide precise control over search scope. HTML content is automatically
-    converted to markdown for better LLM processing when include_body=True.
+    Note: Use the returned IDs to call get_email(), get_chat_message(), or get_channel_message()
+    for complete message content. KQL filters provide precise control over search scope.
     """
     logger.info(
         f"search_communication called: query='{query}', limit={limit}, "
-        f"kql_filters='{kql_filters}', include_body={include_body}"
+        f"kql_filters='{kql_filters}'"
     )
 
     try:
@@ -1012,11 +1008,7 @@ def search_communication(
 
                             if "hits" in container:
                                 for hit in container["hits"]:
-                                    processed_item = _process_search_hit(
-                                        hit,
-                                        include_body,
-                                        body_max_length,
-                                    )
+                                    processed_item = _process_communication_hit(hit)
                                     if processed_item:
                                         all_results.append(processed_item)
 
@@ -1048,7 +1040,6 @@ def search_communication(
                 "entity_types_searched": entity_types,
                 "entity_type_counts": entity_type_counts,
                 "limit_applied": limit,
-                "include_body": include_body,
             },
             "results": all_results[:limit],  # Apply final limit
         }
@@ -1072,6 +1063,60 @@ def search_communication(
             "results": [],
         }
         return error_response
+
+
+def _process_communication_hit(hit: dict[str, Any]) -> dict[str, Any] | None:
+    """Process a single communication search hit from Microsoft Graph Search API.
+
+    Extracts all relevant metadata and identifiers needed to subsequently retrieve
+    full message content using get_email, get_chat_message, or get_channel_message.
+    """
+    try:
+        resource = hit.get("resource", {})
+        hit_id = hit.get("hitId", "")
+
+        if not resource:
+            logger.warning(f"No resource found in hit: {hit}")
+            return None
+
+        # Make a copy of the resource to avoid modifying the original
+        result = dict(resource)
+
+        # Add entity type detection from @odata.type
+        odata_type = resource.get("@odata.type", "").lower()
+        entity_type = "unknown"
+        result["hitId"] = hit_id  # Include hitId
+        if "microsoft.graph.message" in odata_type:
+            entity_type = "message"
+            # For emails, the hitId can be used directly with get_email
+            result["id"] = hit_id
+        elif "microsoft.graph.chatmessage" in odata_type:
+            entity_type = "chatMessage"
+            # For chat messages, we need both chatId and id for get_chat_message
+            # The id field is already in the resource
+
+        result["entity_type"] = entity_type
+
+        # Add search metadata from the hit
+        result["search_rank"] = hit.get("rank", 0)
+        result["search_summary"] = hit.get("summary", "")
+
+        # Add conversation URL for emails
+        if entity_type == "message" and resource.get("conversationId"):
+            result["conversation_url"] = (
+                f"https://outlook.office.com/mail/deeplink/readconv/{quote(resource['conversationId'], safe='')}"
+            )
+
+        logger.info(
+            f"Processed {entity_type} hit: ID={resource.get('id', 'unknown')}, "
+            f"Subject/Summary={resource.get('subject', result.get('search_summary', 'No subject'))[:50]}..."
+        )
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"Failed to process communication hit: {str(e)}")
+        return None
 
 
 def _process_search_hit(
