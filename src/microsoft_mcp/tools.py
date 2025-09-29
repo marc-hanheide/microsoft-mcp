@@ -972,13 +972,6 @@ def unified_search(
     )
 
     try:
-        # Default to compatible entity types if none specified
-        # Starting with file-related types as they are most commonly searched together
-        if entity_types is None:
-            entity_types = [
-                "driveItem",
-                "site",
-            ]
 
         # Validate entity types
         valid_entity_types = {
@@ -990,6 +983,15 @@ def unified_search(
             "chatMessage",
             "person",
         }
+
+        # Default to compatible entity types if none specified
+        # Starting with file-related types as they are most commonly searched together
+        if entity_types is None:
+            entity_types = [
+                "driveItem",
+                "site"
+            ]
+
 
         filtered_entity_types = [et for et in entity_types if et in valid_entity_types]
 
