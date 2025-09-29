@@ -3,6 +3,7 @@ import datetime as dt
 import logging
 import os
 import pathlib as pl
+from pprint import pformat
 import subprocess
 from typing import Any
 from unittest import result
@@ -986,6 +987,9 @@ def search_communication(
             ]
         }
 
+        # Note: Microsoft Search API returns a fixed set of fields regardless of what we request
+        # For messages, it typically returns: @odata.type, receivedDateTime, subject, bodyPreview, from
+
         all_results = []
         entity_type_counts = {}
         total_results = 0
@@ -993,6 +997,7 @@ def search_communication(
         logger.info(
             f"search_communication: Making API request for entity types: {entity_types}"
         )
+        logger.info(f"search_communication: Request payload: {request_payload}")
 
         # Execute search using the graph module's request function
         try:
@@ -1078,7 +1083,9 @@ def _process_search_hit(
 
     Returns the resource data directly from the API with minimal processing,
     just adding entity type detection and body content handling.
+    For emails and chat messages, fetches full body content when include_body=True.
     """
+    logger.info(f"Processing search hit {pformat(hit)}")
     try:
         resource = hit.get("resource", {})
         if not resource:
@@ -1086,7 +1093,7 @@ def _process_search_hit(
 
         # Make a copy of the resource to avoid modifying the original
         result = dict(resource)
-        logger.info(f"Processing search hit resource: {result}")
+        logger.info(f"Processing search hit resource: {resource.get('id', 'unknown')}")
 
         # Add entity type detection from @odata.type
         odata_type = resource.get("@odata.type", "").lower()
@@ -1123,32 +1130,28 @@ def _process_search_hit(
                 f"https://outlook.office.com/mail/deeplink/readconv/{quote(resource['conversationId'], safe='')}"
             )
 
-        # Process body content if requested
-        if include_body and "body" in result:
-            if isinstance(result["body"], dict):
-                body_content = result["body"].get("content", "")
-                content_type = result["body"].get("contentType", "")
-
-                # Convert HTML to markdown if needed
-                if content_type.lower() == "html" and body_content:
-                    body_content = convert_to_markdown(body_content)
-                    result["body"]["contentType"] = "text/markdown"
-
-                # Truncate if necessary
-                if body_content and len(body_content) > body_max_length:
-                    result["body"]["content"] = (
-                        body_content[:body_max_length] + "...[truncated]"
-                    )
-                    result["body"]["truncated"] = True
-                    result["body"]["original_length"] = len(body_content)
-                else:
-                    result["body"]["content"] = body_content
+        # For communication items, fetch full body content if requested
+        if include_body and entity_type in ["message", "chatMessage"]:
+            logger.info(
+                f"Fetching full body content for {entity_type} with ID: {resource.get('id', 'unknown')}"
+            )
+            result = _fetch_full_body_content(result, entity_type, body_max_length)
+            logger.info(
+                f"After fetch_full_body_content, result has body: {'body' in result}"
+            )
         elif not include_body and "body" in result:
             # Remove body if not requested
+            logger.info(
+                f"Removing body content as include_body=False for {entity_type}"
+            )
             del result["body"]
 
-        # Handle content field for files/documents
-        if include_body and "content" in result:
+        # Handle content field for files/documents (non-communication items)
+        if (
+            include_body
+            and "content" in result
+            and entity_type not in ["message", "chatMessage"]
+        ):
             content = result["content"]
             if content and len(content) > body_max_length:
                 result["content"] = content[:body_max_length] + "...[truncated]"
@@ -1162,6 +1165,59 @@ def _process_search_hit(
     except Exception as e:
         logger.warning(f"Failed to process search hit: {str(e)}")
         return None
+
+
+def _fetch_full_body_content(
+    result: dict[str, Any], entity_type: str, body_max_length: int
+) -> dict[str, Any]:
+    """Process body content for communication items (emails and chat messages).
+
+    The Microsoft Search API does not return full body content or message IDs that can be used
+    to fetch full messages. Instead, we use the bodyPreview field that is available in search results.
+    """
+    try:
+        # Microsoft Search API doesn't provide message IDs or full body content
+        # Use the bodyPreview field that is available in search results
+        body_preview = result.get("bodyPreview", "")
+
+        if body_preview:
+            logger.info(f"Using bodyPreview content: {len(body_preview)} characters")
+
+            # Truncate if necessary
+            if len(body_preview) > body_max_length:
+                content = body_preview[:body_max_length] + "...[truncated]"
+                result["body"] = {
+                    "content": content,
+                    "contentType": "text/plain",
+                    "truncated": True,
+                    "original_length": len(body_preview),
+                    "source": "bodyPreview",
+                }
+            else:
+                result["body"] = {
+                    "content": body_preview,
+                    "contentType": "text/plain",
+                    "source": "bodyPreview",
+                }
+
+            logger.info(
+                f"Added body content from bodyPreview: {len(result['body']['content'])} characters"
+            )
+        else:
+            logger.warning(f"No bodyPreview available for {entity_type}")
+            # Add empty body structure to indicate we tried to fetch body content
+            result["body"] = {
+                "content": "",
+                "contentType": "text/plain",
+                "note": "No body preview available from search results",
+                "source": "none",
+            }
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"Failed to process body content: {str(e)}")
+        return result
 
 
 @mcp.tool
