@@ -113,30 +113,37 @@ def request_paginated(path, params=None, limit=None):
 - **Upload Sessions**: Create session → Upload chunks → Finalize
 
 ### 5. Microsoft Search API Integration
-- **Unified Search Endpoint**: `/search/query` API for cross-service content discovery
-- **Entity Type Support**: Supports all Microsoft Graph searchable entities with proper validation
+- **Specialized Search Endpoints**: `/search/query` API implementation with focused search tools
+- **Communication Search**: `search_communication` for emails and Teams messages
+  - **Entity Types**: `message`, `chatMessage` with automatic compatibility handling
+  - **Communication-Specific KQL**: Sender/recipient filtering, mention detection, date ranges
+  - **Body Content Processing**: HTML-to-markdown conversion with configurable truncation
+  - **Conversation URLs**: Deep links for direct message access in Outlook/Teams
+- **File Search**: `search_files` for OneDrive and SharePoint content
+  - **Entity Types**: `driveItem`, `site` with file-focused optimizations
+  - **File-Specific KQL**: File type, author, size, path, and content class filtering
+  - **Metadata Extraction**: File properties, download URLs, SharePoint context
 - **KQL Query Language**: Full Keyword Query Language support for precise filtering
   - Property restrictions: `from:user@domain.com`, `filetype:pdf`, `sent>=2024-01-01`
   - Boolean operators: `AND`, `OR`, `NOT` for complex query construction
   - Date intervals: `today`, `yesterday`, `"this week"`, `"last month"`
   - Wildcard matching: `serv*` for prefix matching
-- **Interleaved Results**: Returns unified results across all content types ranked by relevance
-- **Entity Type Restrictions**: Automatic validation and adjustment for Microsoft Graph API limitations
-  - `event` and `person` entity types cannot be combined with others
-  - `chatMessage` cannot be combined with file-related entity types (`driveItem`, `site`, etc.)
-  - Automatic fallback to compatible entity combinations with user warnings
+- **Entity Type Validation**: Automatic handling of Microsoft Graph API limitations
+  - No mixed entity type combinations (communication vs files)
+  - Simplified architecture eliminates complex compatibility checking
+  - Clear error messages for unsupported operations
 - **Response Processing**: 
   - Automatic entity type detection from `@odata.type`
   - Metadata extraction specific to each entity type
-  - HTML-to-markdown conversion for body content
-  - Deep link generation for direct content access
+  - Tool-specific response formatting and optimization
+  - Search result summaries with entity type breakdown
 - **Performance Optimization**:
-  - Configurable response minimization to reduce token usage
-  - Body content truncation with length limits
-  - Entity type result counting and summaries
+  - Specialized tools reduce response complexity and token usage
+  - Configurable body content inclusion only for communication search
+  - Entity type result counting and summaries per tool
 - **Error Handling**: Comprehensive error handling for search API limitations and failures
   - Detailed error analysis with specific suggestions for 400 Bad Request errors
-  - Entity type compatibility validation to prevent unsupported combinations
+  - Tool-specific error context and recovery suggestions
   - Proper exception raising instead of returning error responses
   - Diagnostic information for authentication and permission issues
 
@@ -169,30 +176,34 @@ def request_paginated(path, params=None, limit=None):
 - **Channel Messages**: list_channel_messages, get_channel_message, search_channel_messages
 - **Features**: Message content search, HTML-to-markdown conversion, date filtering, context information (chat/channel details), attachment support, reply handling
 
-### Universal Search Tools (1 tool)
-- **unified_search**: Comprehensive Microsoft Search API integration with advanced KQL filtering
-- **Supported Entity Types**: 
-  - `message` - Outlook emails
-  - `event` - Calendar events
-  - `driveItem` - OneDrive/SharePoint files and folders
-  - `list` - SharePoint lists  
-  - `listItem` - SharePoint list items
-  - `site` - SharePoint sites
-  - `drive` - OneDrive/SharePoint drives
-  - `chatMessage` - Teams chat and channel messages
-  - `person` - People in organization
-- **KQL Filtering**: Supports Keyword Query Language for precise searches
-  - Date filters: `sent>=2024-01-01`, `lastModified="this week"`
-  - Sender/recipient: `from:john@company.com`, `to:manager@company.com`
-  - Content type: `filetype:pdf`, `filetype:docx`
-  - Teams mentions: `IsMentioned:true`
-  - Content author: `author:"John Smith"`
-- **Response Optimization**: 
-  - Configurable body inclusion with length limits
-  - Minimal response mode to reduce token usage
-  - Entity type result counts and summaries
-  - Relevance ranking and deep links
-- **Interleaved Results**: Returns unified results across all content types ranked by relevance
+### Specialized Search Tools (2 tools)
+- **search_communication**: Focused search for communication content (emails and Teams messages)
+  - **Entity Types**: `message` (Outlook emails), `chatMessage` (Teams messages)
+  - **KQL Filtering**: Advanced filtering for communication-specific searches
+    - Date filters: `sent>=2024-01-01`, `received<=2024-09-30`
+    - Sender/recipient: `from:john@company.com`, `to:manager@company.com`
+    - Teams mentions: `IsMentioned:true`
+    - Attachment filtering: `hasAttachments:true`
+  - **Body Content**: Optional markdown body inclusion with configurable length limits
+  - **Response Features**: Conversation URLs, HTML-to-markdown conversion, search summaries
+  
+- **search_files**: Specialized search for files and SharePoint content
+  - **Entity Types**: `driveItem` (OneDrive/SharePoint files), `site` (SharePoint sites)
+  - **KQL Filtering**: File-specific advanced filtering capabilities
+    - File type filters: `filetype:pdf`, `filetype:docx OR filetype:xlsx`
+    - Author filtering: `author:"John Smith"`
+    - Date filtering: `lastModifiedTime>=2024-01-01`
+    - Size filtering: `size>=1048576` (files larger than 1MB)
+    - Path filtering: `path:"/sites/projectsite"`
+    - Content class: `contentclass:STS_ListItem_DocumentLibrary`
+  - **Response Features**: Download URLs, file metadata, SharePoint site information
+  
+**Architecture Changes**:
+- **Replaced unified_search**: Split single universal search into two focused tools
+- **Communication Focus**: `search_communication` optimized for finding messages and emails
+- **File Focus**: `search_files` optimized for OneDrive and SharePoint content discovery
+- **Improved Specialization**: Each tool provides entity-type-specific features and documentation
+- **Enhanced KQL Support**: More comprehensive KQL examples and filtering options per tool type
 
 ## Configuration
 

@@ -906,109 +906,61 @@ def _analyze_search_error(error: Exception, request_payload: dict) -> str:
 
 
 @mcp.tool
-def unified_search(
+def search_communication(
     query: str,
-    entity_types: list[str] | None = None,
-    limit: int = 50,
+    limit: int = 10,
     kql_filters: str | None = None,
     include_body: bool = False,
     body_max_length: int = 1000,
 ) -> dict[str, Any]:
-    """Universal search across Microsoft 365 content using the Microsoft Search API.
+    """Search for communication content including emails and Teams messages using Microsoft Search API.
 
-    Searches across emails, calendar events, files, SharePoint content, Teams messages, and people
-    using a single unified API. Supports advanced KQL (Keyword Query Language) filters for precise
-    results and efficient token usage.
+    Searches across Outlook emails and Teams chat/channel messages to find relevant communications.
+    Supports advanced KQL (Keyword Query Language) filters for precise search results and
+    efficient token usage. Body content can be included as markdown for LLM processing.
 
     Args:
-        query: Search terms or KQL query string (e.g., "project meeting", "from:john@company.com budget")
-        entity_types: List of content types to search. Options:
-            - "message": Outlook emails
-            - "event": Calendar events
-            - "driveItem": OneDrive/SharePoint files and folders
-            - "list": SharePoint lists
-            - "listItem": SharePoint list items
-            - "site": SharePoint sites
-            - "drive": OneDrive/SharePoint drives
-            - "chatMessage": Teams chat and channel messages
-            - "person": People in your organization
-            If None, searches all supported types for comprehensive results.
-        limit: Maximum number of results to return (1-100, defaults to 50)
+        query: Search terms or KQL query string (e.g., "project meeting", "budget discussion")
+        limit: Maximum number of results to return (1-100, defaults to 10)
         kql_filters: Additional KQL filters for precise search. Examples:
             - "from:john@company.com" - Emails from specific sender
-            - "sent>=2024-01-01" - Items after specific date
+            - "sent>=2024-01-01" - Messages after specific date
             - "to:manager@company.com" - Emails to specific recipient
             - "IsMentioned:true" - Teams messages where you're mentioned
-            - "filetype:pdf" - Only PDF files
-            - "author:\"John Smith\"" - Content authored by John Smith
-        include_body: Whether to include full body/content (increases response size)
+            - "received>=2024-09-01 AND received<=2024-09-30" - Messages from September 2024
+            - "hasAttachments:true" - Messages with attachments
+        include_body: Whether to include full message body/content (increases response size)
         body_max_length: Maximum characters for body content when included (default 1000)
 
     Returns:
         Search results containing:
         - summary: Search statistics (total results, entity type breakdown)
-        - results: Array of matching items containing all available fields from Microsoft Graph API:
-            - All original fields from the API resource
-            - entity_type: Type of content (message, event, driveItem, etc.)
+        - results: Array of matching communication items with:
+            - All original fields from Microsoft Graph API
+            - entity_type: "message" for emails or "chatMessage" for Teams messages
             - search_rank: Search relevance score
             - search_summary: Brief content preview from search
             - conversation_url: Deep link for messages (when available)
-            - body: Full content if include_body=True (converted to markdown for HTML content)
+            - body: Full content as markdown if include_body=True (HTML converted to markdown)
 
     Examples:
-        - unified_search("budget meeting") - Find all content about budget meetings
-        - unified_search("project alpha", ["message", "chatMessage"]) - Search emails and Teams messages only
-        - unified_search("quarterly report", kql_filters="filetype:pdf OR filetype:docx") - Find documents only
-        - unified_search("", kql_filters="from:manager@company.com sent>=2024-01-01") - Recent emails from manager
-        - unified_search("presentation", kql_filters="author:\"Sarah Wilson\"") - Sarah's presentations
-        - unified_search("important", entity_types=["message"], kql_filters="IsMentioned:true") - Important emails mentioning you
+        - search_communication("budget meeting") - Find emails and Teams messages about budget meetings
+        - search_communication("project update", kql_filters="from:manager@company.com") - Updates from manager
+        - search_communication("quarterly report", kql_filters="sent>=2024-07-01") - Recent quarterly reports
+        - search_communication("", kql_filters="IsMentioned:true AND received>=2024-09-01") - Recent mentions
+        - search_communication("important", include_body=True) - Important messages with full content
 
-    Note: KQL filters allow precise control over search scope and can significantly improve relevance.
-    Results now include all available fields from the Microsoft Graph API for maximum information.
+    Note: KQL filters provide precise control over search scope. HTML content is automatically
+    converted to markdown for better LLM processing when include_body=True.
     """
     logger.info(
-        f"unified_search called: query='{query}', entity_types={entity_types}, "
-        f"kql_filters='{kql_filters}', limit={limit}, include_body={include_body}"
+        f"search_communication called: query='{query}', limit={limit}, "
+        f"kql_filters='{kql_filters}', include_body={include_body}"
     )
 
     try:
-
-        # Validate entity types
-        valid_entity_types = {
-            "message",
-            "event",
-            "driveItem",
-            "site",
-            "drive",
-            "chatMessage",
-            "person",
-        }
-
-        # Default to compatible entity types if none specified
-        # Starting with file-related types as they are most commonly searched together
-        if entity_types is None:
-            entity_types = [
-                "driveItem",
-                "site"
-            ]
-
-
-        filtered_entity_types = [et for et in entity_types if et in valid_entity_types]
-
-        if not filtered_entity_types:
-            logger.warning(
-                f"unified_search: No valid entity types provided from {entity_types}"
-            )
-            return {
-                "summary": {
-                    "total_results": 0,
-                    "query": query,
-                    "kql_filters": kql_filters,
-                    "entity_types_requested": entity_types,
-                    "error": "No valid entity types provided",
-                },
-                "results": [],
-            }
+        # Communication entity types: emails and Teams messages
+        entity_types = ["message", "chatMessage"]
 
         # Build the search query
         search_query = query.strip()
@@ -1026,7 +978,7 @@ def unified_search(
         request_payload = {
             "requests": [
                 {
-                    "entityTypes": filtered_entity_types,
+                    "entityTypes": entity_types,
                     "query": {"queryString": search_query},
                     "size": min(limit, 25),  # Microsoft Graph max per request
                     "from": 0,
@@ -1034,79 +986,18 @@ def unified_search(
             ]
         }
 
-        # Add fields for better results
-        # if include_body:
-        #     request_payload["requests"][0]["fields"] = [
-        #         "id",
-        #         "subject",
-        #         "title",
-        #         "name",
-        #         "body",
-        #         "content",
-        #         "summary",
-        #         "from",
-        #         "to",
-        #         "sender",
-        #         "author",
-        #         "createdDateTime",
-        #         "lastModifiedDateTime",
-        #         "receivedDateTime",
-        #         "sentDateTime",
-        #         "size",
-        #         "webUrl",
-        #         "webLink",
-        #     ]
-
         all_results = []
         entity_type_counts = {}
         total_results = 0
 
-        # Validate entity type combinations - some combinations are not supported
-        # Based on Microsoft Graph Search API limitations
-        if len(filtered_entity_types) > 1:
-            # Check for incompatible combinations
-            message_chat_types = {"message", "chatMessage"}
-            file_types = {"driveItem", "list", "listItem", "site", "drive"}
-
-            has_message_chat = any(
-                et in message_chat_types for et in filtered_entity_types
-            )
-            has_file_types = any(et in file_types for et in filtered_entity_types)
-            has_event = "event" in filtered_entity_types
-            has_person = "person" in filtered_entity_types
-
-            # Events cannot be combined with other types
-            if has_event and len(filtered_entity_types) > 1:
-                logger.warning(
-                    "unified_search: Event entity type cannot be combined with others, using event only"
-                )
-                filtered_entity_types = ["event"]
-            # Person cannot be combined with other types
-            elif has_person and len(filtered_entity_types) > 1:
-                logger.warning(
-                    "unified_search: Person entity type cannot be combined with others, using person only"
-                )
-                filtered_entity_types = ["person"]
-            # Message/chatMessage cannot be combined with file types
-            elif has_message_chat and has_file_types:
-                logger.warning(
-                    "unified_search: Message/chat types cannot be combined with file types, prioritizing messages"
-                )
-                filtered_entity_types = [
-                    et for et in filtered_entity_types if et in message_chat_types
-                ]
-
         logger.info(
-            f"unified_search: Final entity types after validation: {filtered_entity_types}"
+            f"search_communication: Making API request for entity types: {entity_types}"
         )
 
         # Execute search using the graph module's request function
         try:
-            logger.info(
-                f"unified_search: Making API request with payload: {request_payload}"
-            )
             result = graph.request("POST", "/search/query", json=request_payload)
-            logger.info(f"unified_search: API response received, type: {type(result)}")
+            logger.info(f"search_communication: API response received")
 
             if result and "value" in result:
                 for response in result["value"]:
@@ -1135,11 +1026,9 @@ def unified_search(
         except Exception as search_error:
             error_details = _analyze_search_error(search_error, request_payload)
             logger.error(
-                f"unified_search API error: {str(search_error)}\nError analysis: {error_details}",
+                f"search_communication API error: {str(search_error)}\nError analysis: {error_details}",
                 exc_info=True,
             )
-            # Re-raise the exception instead of returning an error response
-            # This allows the MCP framework to handle the error appropriately
             raise RuntimeError(
                 f"Microsoft Graph Search API failed: {error_details}"
             ) from search_error
@@ -1151,7 +1040,7 @@ def unified_search(
                 "total_available": total_results,
                 "query": query,
                 "kql_filters": kql_filters,
-                "entity_types_searched": filtered_entity_types,
+                "entity_types_searched": entity_types,
                 "entity_type_counts": entity_type_counts,
                 "limit_applied": limit,
                 "include_body": include_body,
@@ -1160,19 +1049,19 @@ def unified_search(
         }
 
         logger.info(
-            f"unified_search successful: found {len(all_results)} results "
+            f"search_communication successful: found {len(all_results)} results "
             f"across {len(entity_type_counts)} entity types with query '{search_query}'"
         )
         return response
 
     except Exception as e:
-        logger.error(f"unified_search failed: {str(e)}", exc_info=True)
+        logger.error(f"search_communication failed: {str(e)}", exc_info=True)
         error_response = {
             "summary": {
                 "total_results": 0,
                 "query": query,
                 "kql_filters": kql_filters,
-                "entity_types_requested": entity_types,
+                "entity_types_searched": ["message", "chatMessage"],
                 "error": str(e),
             },
             "results": [],
@@ -1279,54 +1168,160 @@ def _process_search_hit(
 def search_files(
     query: str,
     limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Search for files and folders in OneDrive using text queries.
+    kql_filters: str | None = None,
+) -> dict[str, Any]:
+    """Search for files and folders across OneDrive and SharePoint using Microsoft Search API.
 
-    Find files by name, content, or metadata across your entire OneDrive. More powerful than
-    browsing folders - searches filenames, document content, and file properties.
+    Searches across OneDrive files, SharePoint documents, and sites to find relevant content.
+    Supports advanced KQL (Keyword Query Language) filters for precise search results.
+    More powerful than browsing folders - searches filenames, document content, metadata, and SharePoint sites.
 
     Args:
-        query: Search terms to find files (e.g., "budget report", "vacation photos", "presentation")
+        query: Search terms to find files and sites (e.g., "budget report", "project documents", "quarterly presentation")
         limit: Maximum number of results to return (1-100, defaults to 50)
+        kql_filters: Additional KQL filters for precise search. Examples:
+            - "filetype:pdf" - Only PDF files
+            - "filetype:docx OR filetype:xlsx" - Word or Excel files
+            - "author:\"John Smith\"" - Content authored by John Smith
+            - "lastModifiedTime>=2024-01-01" - Files modified after specific date
+            - "size>=1048576" - Files larger than 1MB (size in bytes)
+            - "path:\"/sites/projectsite\"" - Files in specific SharePoint site
+            - "contentclass:STS_ListItem_DocumentLibrary" - SharePoint document library items
 
     Returns:
-        List of matching file/folder objects containing:
-        - Basic info: id, name, type (file/folder), size (bytes), modified (timestamp)
-        - Download info: download_url for direct file access (for files only)
-        - Results ranked by relevance to search query
+        Search results containing:
+        - summary: Search statistics (total results, entity type breakdown)
+        - results: Array of matching file/site items with:
+            - All original fields from Microsoft Graph API
+            - entity_type: "driveItem" for files/folders or "site" for SharePoint sites
+            - search_rank: Search relevance score
+            - search_summary: Brief content preview from search
+            - For files: id, name, size, lastModifiedDateTime, download_url, webUrl
+            - For sites: id, displayName, webUrl, description
 
     Examples:
         - search_files("presentation") - Find files with "presentation" in name or content
-        - search_files("budget 2024") - Find budget-related files from 2024
-        - search_files("photos vacation") - Find vacation photos
-        - search_files(".pdf report") - Find PDF files containing "report"
+        - search_files("budget 2024", kql_filters="filetype:xlsx") - Find Excel budget files from 2024
+        - search_files("", kql_filters="author:\"Sarah Wilson\" AND filetype:pdf") - Sarah's PDF documents
+        - search_files("project alpha", kql_filters="lastModifiedTime>=2024-09-01") - Recent project alpha files
+        - search_files("quarterly", kql_filters="filetype:pptx OR filetype:pdf") - Quarterly presentations/reports
+        - search_files("team site", kql_filters="contentclass:STS_Web") - Find SharePoint team sites
+
+    Note: KQL filters provide precise control over file types, authors, dates, and locations.
+    Results include both OneDrive files and SharePoint content for comprehensive coverage.
     """
-    logger.info(f"search_files called: query='{query}', limit={limit}")
+    logger.info(
+        f"search_files called: query='{query}', limit={limit}, kql_filters='{kql_filters}'"
+    )
 
     try:
-        items = list(graph.search_query(query, ["driveItem"], limit))
+        # File and site entity types
+        entity_types = ["driveItem", "site"]
 
-        result = [
-            {
-                "id": item["id"],
-                "name": item["name"],
-                "type": "folder" if "folder" in item else "file",
-                "size": item.get("size", 0),
-                "modified": item.get("lastModifiedDateTime"),
-                "download_url": item.get("@microsoft.graph.downloadUrl"),
-            }
-            for item in items
-        ]
+        # Build the search query
+        search_query = query.strip()
+        if kql_filters:
+            if search_query:
+                search_query = f"({search_query}) AND ({kql_filters})"
+            else:
+                search_query = kql_filters
+
+        # Ensure we have a valid search query - Microsoft Graph requires non-empty query
+        if not search_query or search_query.isspace():
+            search_query = "*"  # Use wildcard for "all content" search
+
+        # Prepare the search request payload
+        request_payload = {
+            "requests": [
+                {
+                    "entityTypes": entity_types,
+                    "query": {"queryString": search_query},
+                    "size": min(limit, 25),  # Microsoft Graph max per request
+                    "from": 0,
+                }
+            ]
+        }
+
+        all_results = []
+        entity_type_counts = {}
+        total_results = 0
 
         logger.info(
-            f"search_files successful: found {len(result)} files matching '{query}'"
+            f"search_files: Making API request for entity types: {entity_types}"
         )
-        return result
+
+        # Execute search using the graph module's request function
+        try:
+            result = graph.request("POST", "/search/query", json=request_payload)
+            logger.info(f"search_files: API response received")
+
+            if result and "value" in result:
+                for response in result["value"]:
+                    if "hitsContainers" in response:
+                        for container in response["hitsContainers"]:
+                            total_results += container.get("total", 0)
+
+                            if "hits" in container:
+                                for hit in container["hits"]:
+                                    processed_item = _process_search_hit(
+                                        hit,
+                                        include_body=False,  # Files don't need body content
+                                        body_max_length=0,
+                                    )
+                                    if processed_item:
+                                        all_results.append(processed_item)
+
+                                        # Count entity types
+                                        entity_type = processed_item.get(
+                                            "entity_type", "unknown"
+                                        )
+                                        entity_type_counts[entity_type] = (
+                                            entity_type_counts.get(entity_type, 0) + 1
+                                        )
+
+        except Exception as search_error:
+            error_details = _analyze_search_error(search_error, request_payload)
+            logger.error(
+                f"search_files API error: {str(search_error)}\nError analysis: {error_details}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"Microsoft Graph Search API failed: {error_details}"
+            ) from search_error
+
+        # Build response
+        response = {
+            "summary": {
+                "total_results": len(all_results),
+                "total_available": total_results,
+                "query": query,
+                "kql_filters": kql_filters,
+                "entity_types_searched": entity_types,
+                "entity_type_counts": entity_type_counts,
+                "limit_applied": limit,
+            },
+            "results": all_results[:limit],  # Apply final limit
+        }
+
+        logger.info(
+            f"search_files successful: found {len(all_results)} results "
+            f"across {len(entity_type_counts)} entity types with query '{search_query}'"
+        )
+        return response
+
     except Exception as e:
-        logger.error(
-            f"search_files failed for query='{query}': {str(e)}", exc_info=True
-        )
-        raise
+        logger.error(f"search_files failed: {str(e)}", exc_info=True)
+        error_response = {
+            "summary": {
+                "total_results": 0,
+                "query": query,
+                "kql_filters": kql_filters,
+                "entity_types_searched": ["driveItem", "site"],
+                "error": str(e),
+            },
+            "results": [],
+        }
+        return error_response
 
 
 @mcp.tool
